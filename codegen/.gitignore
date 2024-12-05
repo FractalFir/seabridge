@@ -1,0 +1,3 @@
+/target
+*-ice-*.txt
+/tests/*.c

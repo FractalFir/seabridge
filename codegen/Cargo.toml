@@ -1,0 +1,11 @@
+[package]
+name = "rustc_codegen_c"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustc-demangle = "0.1.24"
+[lib]
+crate-type = ["dylib"]
+[profile.release]
+debug = true
