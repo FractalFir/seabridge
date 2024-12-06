@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use rustc_middle::ty::AdtKind;
 use rustc_middle::ty::GenericArg;
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::IntTy;
@@ -66,7 +67,7 @@ template<typename T> struct RustFatPtr{
 #endif\n";
 const RUST_FN_DEF: &str = "
 #ifndef RUST_FN_DEF
-struct RustFnDef{};
+template<uint64_t id> struct RustFnDef{};
 #define RUST_FN_DEF 1
 #endif\n";
 /// An append-only UTF-8 string.
@@ -216,6 +217,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.source_file.push(RUST_FN_DEF);
         res.source_file.push("struct isize{intptr_t i;};\n");
         res.source_file.push("struct usize{uintptr_t i;};\n");
+        res.source_file.push("struct RustChar{uint32_t i;};\n");
         res.source_file
             .push("template<typename... Types> struct RustTuple;\n");
         res.source_file.push("#undef unix\n");
@@ -520,6 +522,7 @@ fn add_ty<'tcx>(
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String =
                                 beg.iter().map(|s| s.as_str()).intersperse("::").collect();
+
                             sb.source_file.push(format!(
                                 "\n#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {end}{generics}{{}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
@@ -588,9 +591,15 @@ fn add_ty<'tcx>(
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String =
                                 beg.iter().map(|s| s.as_str()).intersperse("::").collect();
-                            sb.source_file.push(format!(
-                                "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
-                            ));
+                            if def.adt_kind() == AdtKind::Enum {
+                                sb.source_file.push(format!(
+                                    "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}union {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
+                                ));
+                            } else {
+                                sb.source_file.push(format!(
+                                    "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
+                                ));
+                            }
                         } else {
                             sb.source_file.push(format!(
                                 "#ifndef _RUST_TY_DEF_{name}\n{template_preifx}struct {align}{name}{generics}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
@@ -806,7 +815,8 @@ pub fn add_ty_template<'tcx>(
                         Some(ts)
                     } else {
                         let cst = garg.as_const()?;
-                        let cs = format!("C{c_idx}");
+
+                        let cs = format!("typename TC{c_idx}, TC{c_idx} C{c_idx}");
                         c_idx += 1;
                         Some(cs)
                     }
@@ -897,7 +907,7 @@ pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
         None
     }
 }
-fn generic_ty_string<'tcx>(
+pub fn generic_ty_string<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
     source_builder: &mut crate::souce_builder::CSourceBuilder<'tcx>,
@@ -906,6 +916,7 @@ fn generic_ty_string<'tcx>(
     match ty.kind() {
         TyKind::Uint(UintTy::Usize) => "usize".into(),
         TyKind::Int(IntTy::Isize) => "isize".into(),
+        TyKind::Char => "RustChar".into(),
         _ => {
             source_builder.delay_typedef(ty);
             c_type_string(ty, tcx, source_builder, finstance)
@@ -926,10 +937,19 @@ pub fn generic_string<'tcx>(
             } else {
                 let cst = garg.as_const()?;
                 let (val_tree, ty) = cst.to_valtree();
-                match ty.kind() {
+                let c_type = generic_ty_string(ty, tcx, source_builder, finstance);
+                let val = match ty.kind() {
                     TyKind::Bool => {
-                        format!("{}", val_tree.try_to_scalar().unwrap().to_bool().unwrap()).into()
+                        format!("{}", val_tree.try_to_scalar().unwrap().to_bool().unwrap())
                     }
+                    TyKind::Uint(UintTy::Usize) => format!(
+                        "usize{{{val}}}",
+                        val = val_tree
+                            .try_to_scalar()
+                            .unwrap()
+                            .to_target_usize(&tcx)
+                            .unwrap()
+                    ),
                     //TyKind::Uint(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_u128().unwrap()).into(),
                     //TyKind::Int(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_i128().unwrap()).into(),
                     _ => {
@@ -939,9 +959,10 @@ pub fn generic_string<'tcx>(
 
                         let mut hasher = SipHasher::new_with_keys(0xDEAD_C0FFE, 0xBEEF_BABE);
                         val_tree.hash(&mut hasher);
-                        Some(format!("{:#}", hasher.finish()))
+                        format!("{:#}", hasher.finish() as u64)
                     }
-                }
+                };
+                Some(format!("{c_type}, {val}"))
             }
         })
         .intersperse(",".to_string())

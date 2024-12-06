@@ -331,7 +331,9 @@ pub fn c_type_string<'tcx>(
         TyKind::Tuple(elems) => {
             let generic_string: String = elems
                 .iter()
-                .map(|ty| c_type_string(ty, tcx, source_builder, instance))
+                .map(|ty| {
+                    crate::souce_builder::generic_ty_string(ty, tcx, source_builder, instance)
+                })
                 .intersperse(",".into())
                 .collect();
             let generic_string = format!("<{generic_string}>");
@@ -344,7 +346,16 @@ pub fn c_type_string<'tcx>(
             let name = mangle(ty, tcx);
             format!("struct {name}")
         }
-        TyKind::FnDef(_, _) => "RustFnDef".into(),
+        TyKind::FnDef(_, _) => {
+            use std::hash::Hash;
+            use std::hash::Hasher;
+            use std::hash::SipHasher;
+
+            let mut hasher = SipHasher::new_with_keys(0xDEAD_C0FFE, 0xBEEF_BABE);
+            ty.hash(&mut hasher);
+
+            format!("RustFnDef<0x{:x}>", hasher.finish() as u64)
+        }
         _ => todo!("Can't turn {ty:?} into a c type", ty = ty.kind()),
     }
 }

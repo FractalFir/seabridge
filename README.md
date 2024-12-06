@@ -1,63 +1,53 @@
-# Project Sea Bridge(*siː brɪʤ*) - easy Rust / C++ interop
+# seabridge(*siː brɪʤ*) - next-gen tool for easy Rust / C++ interop
+**WARNING: This tool is in early research phase. It mostly works, but it has some *very* rough edges**
+**Since it is so early in developement, this README may not be up to date. While I try to be clear about what is implemented and planned,**
+**it is important to note that many features are still quite buggy.**
 
 Seabridge is an experimental tool, which uses rich type information from the
-rust compiler to generate high-quality C++ bidnings to Rust code.
+rust compiler to generate high-quality C++ bindings to Rust code.
 
 Thanks to this unqiue, deep access to the internal state of the compiler,
-sebaridge can generate C++ bindings to all Rust types and functions. You
-don't need to write any glue code: seabridge can genearate bindings to all 
-crates out of the box.
+sebaridge can generate C++ bindings to all Rust types(DONE), functions(WIP, no demangling and shims yet), and statics(WIP, no demangling yet). You
+don't need to write any glue code: seabridge can genearate bindings to almost all 
+crates out of the box(currently works with most of `std`, `core`, and `alloc`).
 
+## Solving ABI instability
+### Solving the quiestion of unstable Layout:
+
+Since sebridge uses the same layout calcualtions as the Rust compiler, it can gurantee that the bindings to Rust types it generates are fully accurate. 
+
+Doing things this way eliminates all the layout issues for in case of static linking: who cares if the layout of a Rust type changes, as long as the layout of its C++ counterpart also changes to match it again?
+
+Sebridge can *guarantee* the memory layout of C++ bindings it generates matches whatever the used version of the Rust compiler.
+
+## Keeping up with the everchanging ABI:
+
+TODO: write about translating Rust ABI to C(implemented, but limited/flawed(*unhandled egde cases*) approach), and about generating C-to-Rust shims(WIP, should be rock-solid in theory).
+
+# High level translation
+
+The ultimate goal of Seabridge is allowing you to forget that the code you are using was originaly written in Rust.
+
+Seabrdige translates Rust generics into C++ templates(with some limitations), allowing you to use generic Rust types form C++:
 ```rust
-// In crate `vec`
-#[derive(Clone,Copy,Default)]
-struct Vec3(pub f32,pub f32,pub f32);
-pub fn add(lhs:Vec3, rhs:Vec3)->Vec3{
-	Vec3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.x + rhs.y)
+#[no_mangle]
+fn my_fn(args:(i32,f64,&[u8]))->Box<i32>{
+	eprintln!("Recived args:{args:?}");
+	Box::new(args.0)
 }
-``` 
-
+```
 ```cpp
-#include <vec>
+#include <mycrate/includes/mycrate.hpp>
 int main(){
-   	// The default trait causes `sebaridge` to generate the defualt constructor.
-	vec::Vec3 zero = Vec3();
-	// Since all fields of Vec are accessible in Rust, we can change them in C++ too.
-	vec::Vec3 one;
-	one.f0 = 1.0;
-	one.f1 = 1.0;
-	one.f2 = 1.0;
-	// Plain old call
-	vec::Vec3 sum = vec::add(zero,one);
+	uint8_t* slice_content = "Hi Bob";
+	// Create Rust slice
+	RustSlice slice = {slice_content,6};
+	RustTuple<int32_t,double,RustSlice> args = {8,3.14159,slice};
+	alloc::box::Box<int32_t> rust_box = my_fn(args);
 }
 ```
+Seabridge will also translate all `Drop` impls into C++ destructors.
 
-Seabridge is also able to map drop implementations into C++ destuctors, and adds copy constructors to all Rust types
-which implement `Copy`, ensuring Rust types can be used in convienent and safe ways.
+# LICENSE
 
-Generics are also partialy handled by seabridge, altough there are some limitations. Due to technical limitations, 
-seabridge will only provide function implemenations and type definitions for types monomoprhized(used) by Rust code. 
-In practice, this means that all genercis used by Rust will be exported, and ones not used will not.
-```rust
-// In crate `vec`
-#[derive(Clone,Copy,Default)]
-struct Vec3<T>(pub T,pub T,pub T);
-pub fn add<T:Add>(lhs:Vec3<T>, rhs:Vec3<T>)->Vec3<T>{
-        Vec3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.x + rhs.y)
-}
-pub fn add_vecf32(lhs:Vec<f32>,rhs:Vec<f32>)->Vec<f32>{
-	add(lhs,rhs)
-}
-```
-```cpp
-// OK to use: since Rust used this type, sebridge was able to expose it to C++.
-vec::Vec3<float> val;
-// NOT OK! vec::Vec3<int32_t> was never used by Rust, so this generic does not exist. 
-```
-
-This can be worked around by explicitly listing out generics used by C++. 
-
-```rust
-seabridge_require!(Vec3<i32>);
-seabridve_require!(add<f32>);
-```
+Parts of Seabrdige's code come from `rustc_codegen_clr`, and, as such, it is licensed under the same license as it and the Rust compiler: MIT or Apache. 

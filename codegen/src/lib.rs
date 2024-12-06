@@ -185,6 +185,7 @@ impl CodegenBackend for CBackend {
             let out = std::process::Command::new("g++")
                 .arg(&serialized_asm_path)
                 .arg("-fsyntax-only")
+                .arg("-std=c++20")
                 .output()
                 .expect("Could not run a syntax check using g++");
             if !out.status.success() {
