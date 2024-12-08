@@ -20,21 +20,21 @@ fn build_backend() -> &'static Path {
         // Computes the target-specifc, relative the path to the codegen backend. \Supported OSs: Linux, MacOS, Windows.
         #[cfg(all(target_family = "unix", not(target_os = "macos")))]
         let res = Path::new(if cfg!(debug_assertions) {
-            "target/debug/librustc_codegen_c.so"
+            "../target/debug/librustc_codegen_c.so"
         } else {
-            "target/release/librustc_codegen_c.so"
+            "../target/release/librustc_codegen_c.so"
         });
         #[cfg(target_os = "macos")]
         let res = Path::new(if cfg!(debug_assertions) {
-            "target/debug/librustc_codegen_c.dylib"
+            "../target/debug/librustc_codegen_c.dylib"
         } else {
-            "target/release/librustc_codegen_c.dylib"
+            "../target/release/librustc_codegen_c.dylib"
         });
         #[cfg(target_os = "windows")]
         let res = Path::new(if cfg!(debug_assertions) {
-            "target/debug/librustc_codegen_c.dll"
+            "../target/debug/librustc_codegen_c.dll"
         } else {
-            "target/release/librustc_codegen_c.dll"
+            "../target/release/librustc_codegen_c.dll"
         });
         #[cfg(not(any(target_os = "windows", target_family = "unix")))]
         compile_error!("Unsported host OS.");

@@ -33,6 +33,10 @@ pub(crate) fn compile_function<'tcx>(
     if source_builder.is_defined(finstance) {
         return;
     }
+    let visibility = tcx.visibility(finstance.def_id());
+    if !visibility.is_public() {
+        return;
+    }
     source_builder.add_fn_def(finstance, tcx);
 }
 /// Retrives the arg names from debug info when possible, otherwise retunring a set of unqiue names otherwise.
@@ -90,12 +94,11 @@ pub fn fn_decl<'tcx>(
     instance: Instance<'tcx>,
     tcx: TyCtxt<'tcx>,
     source_builder: &mut crate::souce_builder::CSourceBuilder<'tcx>,
+    fn_name: &str,
 ) -> String {
     // The purpose of this arg is not documented...
     let uncodumented = rustc_middle::ty::List::empty();
-    let fn_name = crate::instance_ident(instance, tcx)
-        .to_string()
-        .replace('.', "_");
+
     let abi = tcx
         .fn_abi_of_instance(PseudoCanonicalInput {
             typing_env: TypingEnv::fully_monomorphized(),
@@ -163,6 +166,7 @@ pub fn fn_decl<'tcx>(
             ))
         }
     };
+
     format!("{ret} {fn_name}({args})")
 }
 
@@ -319,7 +323,7 @@ pub fn c_type_string<'tcx>(
                 format!("{ident}{generic_string}",)
             }
         }
-        TyKind::FnPtr(_, _) => "void*".into(),
+        TyKind::FnPtr(_, _) => "RustFn*".into(),
         TyKind::Closure(did, gargs) => {
             let adt_instance =
                 Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)

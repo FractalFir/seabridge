@@ -147,7 +147,10 @@ impl CodegenBackend for CBackend {
                     .expect("Targets with pointer size bigger than 256 not supported!"),
             );
             let name = crate_info.local_crate_name.to_string();
-            for (item, data) in cgus.into_iter().flat_map(|cgu| cgu.items()) {
+            for (item, data) in cgus
+                .iter()
+                .flat_map(rustc_middle::mir::mono::CodegenUnit::items)
+            {
                 match item {
                     MonoItem::Fn(finstance) => {
                         function::compile_function(*finstance, *data, &mut source_bilder, tcx);
@@ -160,7 +163,7 @@ impl CodegenBackend for CBackend {
                     }
                 }
             }
-            (name, source_bilder.into_source_file())
+            (name, source_bilder.into_source_files())
         };
 
         Box::new((source_files, metadata, crate_info))
@@ -172,30 +175,59 @@ impl CodegenBackend for CBackend {
         _sess: &Session,
         outputs: &OutputFilenames,
     ) -> (CodegenResults, FxIndexMap<WorkProductId, WorkProduct>) {
-        let ((name, header), metadata, crate_info) = *ongoing_codegen
-            .downcast::<((String, StringBuilder), EncodedMetadata, CrateInfo)>()
+        let ((name, (header, rs_bridge)), metadata, crate_info) = *ongoing_codegen
+            .downcast::<(
+                (String, (StringBuilder, StringBuilder)),
+                EncodedMetadata,
+                CrateInfo,
+            )>()
             .expect("in join_codegen: ongoing_codegen is not an Assembly");
         let modules = vec![{
             use std::io::Write;
-            let serialized_asm_path = outputs.temp_path_ext("hpp", Some(&name));
-            std::fs::File::create(&serialized_asm_path)
+            let header_path = outputs
+                .temp_path_ext("hpp", Some(&name))
+                .with_file_name(&name)
+                .with_extension("hpp");
+            std::fs::File::create(&header_path)
                 .unwrap()
                 .write_all(header.bytes())
                 .unwrap();
             let out = std::process::Command::new("g++")
-                .arg(&serialized_asm_path)
+                .arg(&header_path)
                 .arg("-fsyntax-only")
                 .arg("-std=c++20")
                 .output()
                 .expect("Could not run a syntax check using g++");
-            if !out.status.success() {
-                panic!("{out:?}")
-            }
+            assert!(out.status.success(), "{out:?}");
+            let rust_bridge_source = outputs
+                .temp_path_ext("rs_bridge", Some(&name))
+                .with_file_name(&name)
+                .with_extension("rs_bridge");
+            std::fs::File::create(&rust_bridge_source)
+                .unwrap()
+                .write_all(rs_bridge.bytes())
+                .unwrap();
+            let rust_bridge_lib = outputs
+                .temp_path_ext("elf", Some(&name))
+                .with_file_name(&name)
+                .with_extension("elf");
+            let out = std::process::Command::new("rustc")
+                .arg(&rust_bridge_source)
+                .arg("-O")
+                .arg("--crate-type=staticlib")
+                .arg("-o")
+                .arg(&rust_bridge_lib)
+                .output()
+                .expect("Could not compile the Rust bridge code.");
+            eprintln!(
+                "rust_bridge_source:{rust_bridge_source:?} rust_bridge_lib:{rust_bridge_lib:?}"
+            );
+            assert!(out.status.success(), "{out:?}");
             CompiledModule {
                 name,
                 kind: ModuleKind::Regular,
-                object: Some(serialized_asm_path),
-                bytecode: None,
+                object: Some(rust_bridge_lib),
+                bytecode: Some(header_path),
                 dwarf_object: None,
                 llvm_ir: None,
                 assembly: None,
@@ -208,9 +240,7 @@ impl CodegenBackend for CBackend {
             metadata,
             crate_info,
         };
-        if let Ok(_) = std::env::var("FORCE_FAIL") {
-            panic!();
-        }
+        assert!(std::env::var("FORCE_FAIL").is_err());
         (codegen_results, FxIndexMap::default())
     }
     /// Collects all the files emmited by the codegen for a specific crate, and turns them into a .rlib file containing all the C source files and metadata.

@@ -5,6 +5,7 @@ use rustc_middle::ty::GenericArg;
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::IntTy;
 use rustc_middle::ty::List;
+use rustc_middle::ty::Mutability;
 use rustc_middle::ty::PseudoCanonicalInput;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
@@ -218,6 +219,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.source_file.push("struct isize{intptr_t i;};\n");
         res.source_file.push("struct usize{uintptr_t i;};\n");
         res.source_file.push("struct RustChar{uint32_t i;};\n");
+        res.source_file.push("struct RustFn;\n");
         res.source_file
             .push("template<typename... Types> struct RustTuple;\n");
         res.source_file.push("#undef unix\n");
@@ -248,31 +250,44 @@ impl<'tcx> CSourceBuilder<'tcx> {
     /// Adds a new function *declaration* to this source files.
     pub fn add_fn_decl(&mut self, finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
         if !self.is_declared(finstance) {
-            let decl = crate::function::fn_decl(finstance, tcx, self);
-            self.source_file.push(&decl);
-            self.source_file.push(";\n");
+            let fn_name = crate::instance_ident(finstance, tcx)
+                .to_string()
+                .replace('.', "_");
+            if let Some(path) = symbol_to_path(&fn_name) {
+                //
+                let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
+                let namespace: String = beg
+                    .iter()
+                    .map(std::string::String::as_str)
+                    .intersperse("::")
+                    .collect();
+                let gargs = finstance.args;
+                
+                //
+                let generic_string = generic_string(gargs, tcx, self, finstance);
+                // Template preifx 
+             
+                let template = if generic_string.is_empty() {
+                    String::new()
+                } else {
+                    format!("template{generic_string}")
+                };
+             
+                let decl = crate::function::fn_decl(finstance, tcx, self, &end);
+                self.source_file
+                    .push(format!("namespace {namespace}{{ /*fndecl*/ {template}{decl}; }}",));
+                self.source_file.push(";\n");
+            } else {
+                let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
+                self.source_file.push(&decl);
+                self.source_file.push(";\n");
+            }
             self.set_declared(finstance);
         }
     }
     /// Adds a function definition(the implementation of a function).
     pub fn add_fn_def(&mut self, finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
-        if self.header_mode() {
-            self.add_fn_decl(finstance, tcx);
-            return;
-        }
-        let decl = crate::function::fn_decl(finstance, tcx, self);
-        self.set_defined(finstance);
-
-        let attrs = tcx.codegen_fn_attrs(finstance.def_id());
-        // If section supported, and specified, provide it
-        let section = if self.supports_section()
-            && let Some(section) = attrs.link_section
-        {
-            format!("__attribute__((section(\"{section:?}\")))")
-        } else {
-            String::new()
-        };
-        self.source_file.push(format!("{section}{decl};\n"));
+        self.add_fn_decl(finstance, tcx);
     }
     /// Checks if the generated source file ought to be only a header, and not contain any implementation.
     #[allow(clippy::unused_self)]
@@ -300,10 +315,10 @@ impl<'tcx> CSourceBuilder<'tcx> {
         true
     }
     /// Truns `self` into the underlying C source file buffer.
-    pub fn into_source_file(mut self) -> StringBuilder {
+    pub fn into_source_files(mut self) -> (StringBuilder, StringBuilder) {
         self.source_file
             .push("#ifdef __unix__\n#define unix 1\n#endif\n");
-        self.source_file
+        (self.source_file, self.rust_file)
     }
     /// Returns a mutable reference to the backing buffer.
     pub fn source_file_mut(&mut self) -> &mut StringBuilder {
@@ -317,6 +332,56 @@ impl<'tcx> CSourceBuilder<'tcx> {
     pub fn delay_typedef(&mut self, ty: Ty<'tcx>) {
         self.delayed_typedefs.push_front(ty);
     }
+    /* 
+    fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
+        if self.is_declared(genetric_fn) {
+            return;
+        }
+        let fn_name = crate::instance_ident(genetric_fn, tcx)
+            .to_string()
+            .replace('.', "_");
+        let Some(path) = symbol_to_path(&fn_name) else {
+            panic!()
+        };
+        let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
+        let namespace: String = beg
+            .iter()
+            .map(std::string::String::as_str)
+            .intersperse("::")
+            .collect();
+        let mut t_idx = 0;
+        let mut c_idx = 0;
+        let garg_body: String = genetric_fn
+            .args
+            .iter()
+            .filter_map(|garg| {
+                if let Some(ty) = garg.as_type() {
+                    let ts = format!("typename T{t_idx}");
+                    t_idx += 1;
+                    Some(ts)
+                } else {
+                    let cst = garg.as_const()?;
+
+                    let cs = format!("typename TC{c_idx}, TC{c_idx} C{c_idx}");
+                    c_idx += 1;
+                    Some(cs)
+                }
+            })
+            .intersperse(",".to_string())
+            .collect();
+        let template = if garg_body.is_empty() {
+            "".into()
+        } else {
+            format!("template<{garg_body}> ")
+        };
+        // TODO: fullt
+        let decl = format!(""end;
+        self.source_file.push(format!(
+            "namespace {namespace}{{ /*fn template*/{template}{decl}; }}",
+        ));
+        self.source_file.push(";\n");
+        self.set_declared(genetric_fn);
+    }*/ 
 }
 /// Adds the type `t` to `sb`
 #[allow(clippy::too_many_lines)]
@@ -413,11 +478,8 @@ fn add_ty<'tcx>(
             let fn_ptr =
                 tcx.normalize_erasing_late_bound_regions(TypingEnv::fully_monomorphized(), *binder);
 
-            fn_ptr
-                .inputs()
-                .iter()
-                .for_each(|t| add_ty(sb, tcx, *t, instance));
-            add_ty(sb, tcx, fn_ptr.output(), instance);
+            fn_ptr.inputs().iter().for_each(|t| sb.delay_typedef(*t));
+            sb.delay_typedef(fn_ptr.output());
         }
         TyKind::Closure(did, gargs) => {
             let adt_instance =
@@ -510,7 +572,7 @@ fn add_ty<'tcx>(
                 .expect("Could not compute the layout of a type.");
             let generics = generic_string(gargs, tcx, sb, instance);
             let template_preifx = if generics.is_empty() {
-                "".into()
+                ""
             } else {
                 "template<> "
             };
@@ -911,15 +973,44 @@ pub fn generic_ty_string<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
     source_builder: &mut crate::souce_builder::CSourceBuilder<'tcx>,
-    finstance: Instance<'tcx>,
+    instance: Instance<'tcx>,
 ) -> String {
     match ty.kind() {
         TyKind::Uint(UintTy::Usize) => "usize".into(),
         TyKind::Int(IntTy::Isize) => "isize".into(),
         TyKind::Char => "RustChar".into(),
+        TyKind::RawPtr(inner, mutability) | TyKind::Ref(_, inner, mutability) => {
+            let mutability = match mutability {
+                Mutability::Not => "const",
+                Mutability::Mut => "",
+            };
+            if crate::is_fat_ptr(ty, tcx, instance) {
+                match inner.kind() {
+                    TyKind::Str => {
+                        format!("RustStr")
+                    }
+                    TyKind::Slice(elem) => {
+                        let tpe = generic_ty_string(*elem, tcx, source_builder, instance);
+                        format!("RustSlice<{tpe}>")
+                    }
+                    TyKind::Dynamic(_, _, _) => format!("RustDyn"),
+                    _ => format!(
+                        "RustFatPtr<{inner}>",
+                        inner = generic_ty_string(*inner, tcx, source_builder, instance)
+                    ),
+                }
+            } else if is_zst(*inner, tcx) {
+                format!("void {mutability}*")
+            } else {
+                format!(
+                    "{} {mutability}*",
+                    generic_ty_string(*inner, tcx, source_builder, instance)
+                )
+            }
+        }
         _ => {
             source_builder.delay_typedef(ty);
-            c_type_string(ty, tcx, source_builder, finstance)
+            c_type_string(ty, tcx, source_builder, instance)
         }
     }
 }

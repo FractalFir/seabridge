@@ -456,6 +456,7 @@ fn dump_var(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn0(mut _1: bool, mut _2: u16, mut _3: isize, mut _4: i8, mut _5: i64) -> i16 {
     mir! {
     type RET = i16;
@@ -639,6 +640,7 @@ pub fn fn0(mut _1: bool, mut _2: u16, mut _3: isize, mut _4: i8, mut _5: i64) ->
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn1(
     mut _1: i64,
     mut _2: i64,
@@ -946,6 +948,7 @@ fn fn1(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn2(
     mut _1: i8,
     mut _2: i8,
@@ -1095,6 +1098,7 @@ pub fn fn2(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn3(
     mut _1: i64,
     mut _2: i16,
@@ -1334,6 +1338,7 @@ fn fn3(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn4(
     mut _1: i64,
     mut _2: i64,
@@ -1542,6 +1547,7 @@ fn fn4(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn5(mut _1: i64, mut _2: i64, mut _3: isize, mut _4: i64, mut _5: bool) -> bool {
     mir! {
     type RET = bool;
@@ -1583,6 +1589,7 @@ fn fn5(mut _1: i64, mut _2: i64, mut _3: isize, mut _4: i64, mut _5: bool) -> bo
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn6(mut _1: i64, mut _2: i8, mut _3: u8, mut _4: [i64; 7], mut _5: i64) -> char {
     mir! {
     type RET = char;
@@ -1845,6 +1852,7 @@ fn fn6(mut _1: i64, mut _2: i8, mut _3: u8, mut _4: [i64; 7], mut _5: i64) -> ch
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn7(
     mut _1: isize,
     mut _2: i128,
@@ -2097,6 +2105,7 @@ pub fn fn7(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn8(
     mut _1: i64,
     mut _2: i64,
@@ -2363,6 +2372,7 @@ pub fn fn8(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 fn fn9(
     mut _1: i64,
     mut _2: i64,
@@ -2409,6 +2419,7 @@ fn fn9(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn10(mut _1: i64, mut _2: i64) -> (isize,) {
     mir! {
     type RET = (isize,);
@@ -2637,6 +2648,7 @@ pub fn fn10(mut _1: i64, mut _2: i64) -> (isize,) {
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn11(
     mut _1: bool,
     mut _2: (&'static f64, bool, bool, u64, usize),
@@ -2694,6 +2706,7 @@ pub fn fn11(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn12(
     mut _1: i64,
     mut _2: u8,
@@ -2867,6 +2880,7 @@ pub fn fn12(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn13(
     mut _1: i64,
     mut _2: i64,
@@ -2949,6 +2963,7 @@ pub fn fn13(
     }
 }
 #[custom_mir(dialect = "runtime", phase = "initial")]
+#[no_mangle]
 pub fn fn14(
     mut _1: i64,
     mut _2: i64,
@@ -3197,7 +3212,8 @@ pub fn fn14(
 
     }
 }
-pub fn main() {
+#[no_mangle]
+pub fn test_main() {
     fn0(
         std::hint::black_box(true),
         std::hint::black_box(15983_u16),

@@ -23,7 +23,8 @@ macro_rules! test_numeric_static {
 }
 static NANY: f32 = f32::NAN;
 static NANY2: f64 = f64::NAN;
-fn main() {
+#[no_mangle]
+pub fn test_main() {
     let zero = unsafe { INT32 };
     assert_eq!(zero, 0);
     unsafe { INT32 += 1 };
