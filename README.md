@@ -10,7 +10,7 @@ Seabridge is an experimental tool, which uses rich type information from the rus
 Thanks to this unqiue, deep access to the internal state of the compiler,
 sebaridge can generate C++ bindings to all Rust types(DONE, bit buggy), functions(WIP, demangled + generic support but no shims yet), and statics(WIP, no demangling yet). 
 
-This will allow you to *just* use a Rust crate inside a C++ codebase, without much setup. The tool is also able to translate high level Rust concepts, like generics, into C++ equivalents(templates).
+This(in theory) will allow you to *just* use a Rust crate inside a C++ codebase, without much setup. The tool is also able to translate high level Rust concepts, like generics, into C++ equivalents(templates).
 
 
 For most scenarios, you will not need to write any glue code(generics may require a bit of setup in some cases).

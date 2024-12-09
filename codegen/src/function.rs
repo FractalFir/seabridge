@@ -21,6 +21,7 @@ use rustc_hir::Mutability;
 
 use crate::monomorphize;
 use crate::souce_builder::is_zst;
+use crate::souce_builder::CSourceBuilder;
 
 use std::fmt::Write;
 /// Compiles a function into a C function defintion.
@@ -87,7 +88,41 @@ fn pass_mode_cast_elems(pad_i32: bool, cast: &CastTarget, arg_name: Option<&str>
     // Collect all the elements, and separate them correctly.
     elems.into_iter().intersperse(",".to_string()).collect()
 }
+pub fn call_shim<'tcx>(instance:Instance<'tcx>,tcx: TyCtxt<'tcx>,shim_name:&str,source_builder:&mut CSourceBuilder)->String{
+    let uncodumented = rustc_middle::ty::List::empty();
 
+    let abi = tcx
+        .fn_abi_of_instance(PseudoCanonicalInput {
+            typing_env: TypingEnv::fully_monomorphized(),
+            value: (instance, uncodumented),
+        })
+        .expect("Could not compute fn abi");
+
+    let args = arg_names(instance, tcx, abi.args.len());
+    let args: String = (&abi.args)
+        .into_iter()
+        .zip(args.iter())
+        .filter_map(|(arg, name)| {
+            // Refence: https://doc.rust-lang.org/stable/nightly-rustc/rustc_target/abi/call/enum.PassMode.html
+            match &arg.mode {
+                // Ignored, so not in the sig.
+                PassMode::Ignore => None,
+                
+
+                _ => Some(name.as_ref()),
+            }
+        })
+        .intersperse(",")
+        .collect();
+    match &abi.ret.mode {
+        PassMode::Ignore => {
+            format!("\t{shim_name}({args});\n")
+        },
+        _ => {
+            format!("\treturn {shim_name}({args});\n")
+        }
+    }
+}
 /// Creates the declaration of this funcion(its signature and name).
 #[allow(clippy::format_collect, clippy::too_many_lines)]
 pub fn fn_decl<'tcx>(

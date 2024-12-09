@@ -44,6 +44,8 @@ mod statics;
 #[allow(missing_docs, clippy::missing_docs_in_private_items)]
 mod test;
 
+mod rust;
+
 use rustc_codegen_ssa::back::archive::ArArchiveBuilder;
 use rustc_codegen_ssa::back::archive::ArchiveBuilder;
 use rustc_codegen_ssa::back::archive::ArchiveBuilderBuilder;

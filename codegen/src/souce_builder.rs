@@ -253,6 +253,10 @@ impl<'tcx> CSourceBuilder<'tcx> {
             let fn_name = crate::instance_ident(finstance, tcx)
                 .to_string()
                 .replace('.', "_");
+
+            let shim_symbol = create_shim(&fn_name);
+            let shim_decl = crate::function::fn_decl(finstance, tcx, self, &shim_symbol);
+            let body = format!("{call_shim}\n",call_shim = crate::function::call_shim(finstance,tcx,&shim_symbol,self));
             if let Some(path) = symbol_to_path(&fn_name) {
                 //
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
@@ -262,7 +266,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
                     .intersperse("::")
                     .collect();
                 let gargs = finstance.args;
-                
+                gargs.iter().filter_map(rustc_middle::ty::GenericArg::as_type).for_each(|ty|add_ty(self, tcx, ty, finstance));
                 //
                 let generic_string = generic_string(gargs, tcx, self, finstance);
                 // Template preifx 
@@ -273,15 +277,17 @@ impl<'tcx> CSourceBuilder<'tcx> {
                     format!("template{generic_string}")
                 };
              
-                let decl = crate::function::fn_decl(finstance, tcx, self, &end);
+                let decl = crate::function::fn_decl(finstance, tcx, self, end);
                 self.source_file
-                    .push(format!("namespace {namespace}{{ /*fndecl*/ {template}{decl}; }}",));
+                    .push(format!("extern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template}{decl}{{{body}}} }}\n",));
                 self.source_file.push(";\n");
             } else {
                 let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
+                self.source_file.push(format!("extern \"C\" {shim_decl};\n"));
                 self.source_file.push(&decl);
-                self.source_file.push(";\n");
+                self.source_file.push(format!("{{{body}}};\n"));
             }
+            reverse_shim();
             self.set_declared(finstance);
         }
     }
@@ -840,7 +846,21 @@ fn add_ty<'tcx>(
     }
     sb.defined_tys.insert(t);
 }
-
+pub fn create_shim(fn_name:&str)->String{
+    const SHIM_NAME:&str = "rust_to_c_shim";
+    if !fn_name.ends_with('E'){
+        return format!("{fn_name}{SHIM_NAME}");
+    }
+    if fn_name.len() < 20{
+        return format!("{fn_name}{SHIM_NAME}");
+    }
+    let hash_len = &fn_name[(fn_name.len() - 20)..(fn_name.len() - 18)];
+    if hash_len != "17"{
+        return format!("{fn_name}{SHIM_NAME}");
+    }
+    let (prefix, generic_hash) = fn_name.split_at(fn_name.len() - 17 - 2 - 1);
+    format!("{prefix}{shim_len}{SHIM_NAME}{generic_hash}",shim_len = SHIM_NAME.len())
+}
 pub fn add_ty_template<'tcx>(
     sb: &mut CSourceBuilder<'tcx>,
     tcx: TyCtxt<'tcx>,
