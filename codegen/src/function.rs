@@ -41,7 +41,7 @@ pub(crate) fn compile_function<'tcx>(
     source_builder.add_fn_def(finstance, tcx);
 }
 /// Retrives the arg names from debug info when possible, otherwise retunring a set of unqiue names otherwise.
-fn arg_names<'tcx>(_instance: Instance<'tcx>, _tcx: TyCtxt<'tcx>, args: usize) -> Vec<String> {
+pub fn arg_names<'tcx>(_instance: Instance<'tcx>, _tcx: TyCtxt<'tcx>, args: usize) -> Vec<String> {
     (0..args).map(|arg| format!("a{arg}")).collect()
 }
 /// Turns the `CastTarget` into a list of variables, that correspond that all of the registers. If `arg_name` is Some, this is sutiable to be inserted into a function argument list.
@@ -88,7 +88,12 @@ fn pass_mode_cast_elems(pad_i32: bool, cast: &CastTarget, arg_name: Option<&str>
     // Collect all the elements, and separate them correctly.
     elems.into_iter().intersperse(",".to_string()).collect()
 }
-pub fn call_shim<'tcx>(instance:Instance<'tcx>,tcx: TyCtxt<'tcx>,shim_name:&str,source_builder:&mut CSourceBuilder)->String{
+pub fn call_shim<'tcx>(
+    instance: Instance<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    shim_name: &str,
+    source_builder: &mut CSourceBuilder,
+) -> String {
     let uncodumented = rustc_middle::ty::List::empty();
 
     let abi = tcx
@@ -107,7 +112,6 @@ pub fn call_shim<'tcx>(instance:Instance<'tcx>,tcx: TyCtxt<'tcx>,shim_name:&str,
             match &arg.mode {
                 // Ignored, so not in the sig.
                 PassMode::Ignore => None,
-                
 
                 _ => Some(name.as_ref()),
             }
@@ -117,7 +121,7 @@ pub fn call_shim<'tcx>(instance:Instance<'tcx>,tcx: TyCtxt<'tcx>,shim_name:&str,
     match &abi.ret.mode {
         PassMode::Ignore => {
             format!("\t{shim_name}({args});\n")
-        },
+        }
         _ => {
             format!("\treturn {shim_name}({args});\n")
         }

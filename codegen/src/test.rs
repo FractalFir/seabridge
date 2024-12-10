@@ -59,3 +59,13 @@ mod generics{ mod debug{
   const IS_RELEASE:bool = true;
   #[test]
   fn stable(){crate::test::utilis::compile_file(std::path::Path::new("tests/generics.rs"), true, IS_RELEASE);}}}
+mod pass_ind{ mod debug{
+  #[cfg(test)]
+  const IS_RELEASE:bool = false;
+  #[test]
+  fn stable(){crate::test::utilis::compile_file(std::path::Path::new("tests/pass_ind.rs"), true, IS_RELEASE);}}
+ mod release{
+  #[cfg(test)]
+  const IS_RELEASE:bool = true;
+  #[test]
+  fn stable(){crate::test::utilis::compile_file(std::path::Path::new("tests/pass_ind.rs"), true, IS_RELEASE);}}}

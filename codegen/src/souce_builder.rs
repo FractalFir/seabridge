@@ -20,6 +20,7 @@ use rustc_abi::Size;
 
 use crate::function::c_type_string;
 use crate::function::mangle;
+use crate::rust::rust_shim;
 /// Builtin, layout-compatible C++ repr of a Rust array
 const RUST_ARR: &str = "#ifndef RUST_ARR_DEFINED
 template<typename T, uintptr_t SIZE> class RustArr{
@@ -194,6 +195,9 @@ impl<'tcx> CSourceBuilder<'tcx> {
             ),
         );
     }
+    pub fn add_rust(&mut self, s: &str) {
+        self.rust_file.push(s);
+    }
     /// Creates a new source file with the specified settings.
     /// `size_of_usize`: result of computing ``size_of(uintptr_t)`` for a given target. Is in bytes.
     pub fn new(size_of_usize: u8) -> Self {
@@ -228,6 +232,37 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.assert_sizeof("void*", (res.size_of_usize / 8).into());
         res.source_file
             .push("struct ptr_pair{void* addr; void* meta;};\n");
+
+        res.rust_file.push("#![feature(slice_ptr_get)]\n");
+        res.rust_file.push("#[repr(C)]
+pub struct RustStr{ptr:*const char, len:usize}
+impl Into<*const str> for RustStr{
+    fn into(self) -> *const str { 
+        unsafe{std::slice::from_raw_parts(self.ptr as *const u8,self.len) as *const [u8] as *const str}
+    }
+}");
+        res.rust_file.push(
+            "#[repr(C)]
+pub struct RustSlice{ptr:*const char, len:usize}
+impl<T> Into<*const [T]> for RustSlice{
+    fn into(self) -> *const [T]{ 
+        unsafe{std::slice::from_raw_parts(self.ptr as *const T,self.len) as *const _}
+    }
+}",
+        );
+        res.rust_file.push(
+            "#[repr(C)]
+pub struct RustDyn{ptr:*const u8, len:usize}
+impl<T> Into<*const [T]> for RustDyn{
+    fn into(self) -> *const [T]{ 
+        unsafe{std::slice::from_raw_parts(self.ptr as *const T,self.len) as *const _}
+    }
+}
+impl<T> Into<RustDyn> for *const [T]{
+    fn into(self) -> RustDyn{ 
+        RustDyn{ptr:self.as_ptr() as *const u8, len:self.len()}
+    }
+}",);
         res
     }
     /// Checks if the target `C` compiler supports the `restrict` keyword.
@@ -256,7 +291,10 @@ impl<'tcx> CSourceBuilder<'tcx> {
 
             let shim_symbol = create_shim(&fn_name);
             let shim_decl = crate::function::fn_decl(finstance, tcx, self, &shim_symbol);
-            let body = format!("{call_shim}\n",call_shim = crate::function::call_shim(finstance,tcx,&shim_symbol,self));
+            let body = format!(
+                "{call_shim}\n",
+                call_shim = crate::function::call_shim(finstance, tcx, &shim_symbol, self)
+            );
             if let Some(path) = symbol_to_path(&fn_name) {
                 //
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
@@ -266,28 +304,32 @@ impl<'tcx> CSourceBuilder<'tcx> {
                     .intersperse("::")
                     .collect();
                 let gargs = finstance.args;
-                gargs.iter().filter_map(rustc_middle::ty::GenericArg::as_type).for_each(|ty|add_ty(self, tcx, ty, finstance));
+                gargs
+                    .iter()
+                    .filter_map(rustc_middle::ty::GenericArg::as_type)
+                    .for_each(|ty| add_ty(self, tcx, ty, finstance));
                 //
                 let generic_string = generic_string(gargs, tcx, self, finstance);
-                // Template preifx 
-             
+                // Template preifx
+
                 let template = if generic_string.is_empty() {
                     String::new()
                 } else {
                     format!("template{generic_string}")
                 };
-             
+
                 let decl = crate::function::fn_decl(finstance, tcx, self, end);
                 self.source_file
                     .push(format!("extern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template}{decl}{{{body}}} }}\n",));
                 self.source_file.push(";\n");
             } else {
                 let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
-                self.source_file.push(format!("extern \"C\" {shim_decl};\n"));
+                self.source_file
+                    .push(format!("extern \"C\" {shim_decl};\n"));
                 self.source_file.push(&decl);
                 self.source_file.push(format!("{{{body}}};\n"));
             }
-            reverse_shim();
+            rust_shim(self, &fn_name, &shim_symbol, finstance, tcx);
             self.set_declared(finstance);
         }
     }
@@ -338,7 +380,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
     pub fn delay_typedef(&mut self, ty: Ty<'tcx>) {
         self.delayed_typedefs.push_front(ty);
     }
-    /* 
+    /*
     fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
         if self.is_declared(genetric_fn) {
             return;
@@ -383,11 +425,12 @@ impl<'tcx> CSourceBuilder<'tcx> {
         // TODO: fullt
         let decl = format!(""end;
         self.source_file.push(format!(
-            "namespace {namespace}{{ /*fn template*/{template}{decl}; }}",
+            "namespace {namespace}{{ /*fn template*/
+{template}{decl}; }}",
         ));
         self.source_file.push(";\n");
         self.set_declared(genetric_fn);
-    }*/ 
+    }*/
 }
 /// Adds the type `t` to `sb`
 #[allow(clippy::too_many_lines)]
@@ -846,20 +889,23 @@ fn add_ty<'tcx>(
     }
     sb.defined_tys.insert(t);
 }
-pub fn create_shim(fn_name:&str)->String{
-    const SHIM_NAME:&str = "rust_to_c_shim";
-    if !fn_name.ends_with('E'){
+pub fn create_shim(fn_name: &str) -> String {
+    const SHIM_NAME: &str = "rust_to_c_shim";
+    if !fn_name.ends_with('E') {
         return format!("{fn_name}{SHIM_NAME}");
     }
-    if fn_name.len() < 20{
+    if fn_name.len() < 20 {
         return format!("{fn_name}{SHIM_NAME}");
     }
     let hash_len = &fn_name[(fn_name.len() - 20)..(fn_name.len() - 18)];
-    if hash_len != "17"{
+    if hash_len != "17" {
         return format!("{fn_name}{SHIM_NAME}");
     }
     let (prefix, generic_hash) = fn_name.split_at(fn_name.len() - 17 - 2 - 1);
-    format!("{prefix}{shim_len}{SHIM_NAME}{generic_hash}",shim_len = SHIM_NAME.len())
+    format!(
+        "{prefix}{shim_len}{SHIM_NAME}{generic_hash}",
+        shim_len = SHIM_NAME.len()
+    )
 }
 pub fn add_ty_template<'tcx>(
     sb: &mut CSourceBuilder<'tcx>,
