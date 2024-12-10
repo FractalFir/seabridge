@@ -18,13 +18,14 @@ pub extern "C" fn recive_box(val: Box<i32>) {}
 pub extern "C" fn recive_vec3_ref(val: &Vec3) {
     recive_vec3(*val)
 }
+/*
 #[inline(never)]
 #[no_mangle]
 pub extern "C" fn pass_btree(
     val: std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>>,
 ) -> std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>> {
     val
-}
+}*/
 
 #[no_mangle]
 pub extern "C" fn non_null_ptr(
@@ -32,6 +33,7 @@ pub extern "C" fn non_null_ptr(
 ) -> std::mem::ManuallyDrop<std::ptr::NonNull<Vec3>> {
     ptr
 }
+/*
 macro_rules! require_type {
     ($uid:ident,$ty:ty) => {
         mod $uid {
@@ -56,3 +58,4 @@ macro_rules! require_fn {
 
 require_type!(BOXI32, Box<i32>);
 require_fn!(RBOXI32, recive_box);
+ */

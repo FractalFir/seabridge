@@ -117,6 +117,8 @@ pub struct CSourceBuilder<'tcx> {
     declared_tys: HashSet<Ty<'tcx>>,
     /// Types which don't yet need to be fully defined, but should be defined at some later point.
     delayed_typedefs: std::collections::vec_deque::VecDeque<Ty<'tcx>>,
+
+    rust_uids: HashSet<String>,
 }
 impl<'tcx> CSourceBuilder<'tcx> {
     pub fn delayed_typedefs(&self) -> &std::collections::vec_deque::VecDeque<Ty<'tcx>> {
@@ -198,6 +200,17 @@ impl<'tcx> CSourceBuilder<'tcx> {
     pub fn add_rust(&mut self, s: &str) {
         self.rust_file.push(s);
     }
+    /// Adds a rust defitioninon with given `uid`, guaranteeing that no duplicates exist.
+    /// This is a workaround for some nasty `C` issues.
+    pub fn add_rust_if_missing(&mut self, s: &str, uid: &str) {
+        match self.rust_uids.entry(uid.to_string()) {
+            std::collections::hash_set::Entry::Occupied(_) => (),
+            std::collections::hash_set::Entry::Vacant(vacant_entry) => {
+                self.rust_file.push(s);
+                vacant_entry.insert();
+            }
+        };
+    }
     /// Creates a new source file with the specified settings.
     /// `size_of_usize`: result of computing ``size_of(uintptr_t)`` for a given target. Is in bytes.
     pub fn new(size_of_usize: u8) -> Self {
@@ -211,6 +224,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
             defined_tys: HashSet::default(),
             declared_tys: HashSet::default(),
             delayed_typedefs: std::collections::vec_deque::VecDeque::with_capacity(0x100),
+            rust_uids: HashSet::default(),
         };
         res.include("stdint.h");
         res.include("stdexcept");
@@ -234,6 +248,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
             .push("struct ptr_pair{void* addr; void* meta;};\n");
 
         res.rust_file.push("#![feature(slice_ptr_get)]\n");
+        res.rust_file.push("#![allow(non_camel_case_types)]");
         res.rust_file.push("#[repr(C)]
 pub struct RustStr{ptr:*const char, len:usize}
 impl Into<*const str> for RustStr{
@@ -262,7 +277,8 @@ impl<T> Into<RustDyn> for *const [T]{
     fn into(self) -> RustDyn{ 
         RustDyn{ptr:self.as_ptr() as *const u8, len:self.len()}
     }
-}",);
+}",
+        );
         res
     }
     /// Checks if the target `C` compiler supports the `restrict` keyword.
@@ -575,7 +591,7 @@ fn add_ty<'tcx>(
                             } else{
                                String::new()
                             };
-                            sb.source_file.push(format!("struct {align}{name}{{\n{fields}}};\n"));
+                            sb.source_file.push(format!("#ifndef _RUST_TY_DEF_{name}\nstruct {align}{name}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"));
                             sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
                         }
@@ -631,8 +647,11 @@ fn add_ty<'tcx>(
                     FieldsShape::Primitive if is_zst(t, tcx) => {
                         if let Some(path) = symbol_to_path(&name) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
-                            let namespace: String =
-                                beg.iter().map(|s| s.as_str()).intersperse("::").collect();
+                            let namespace: String = beg
+                                .iter()
+                                .map(std::string::String::as_str)
+                                .intersperse("::")
+                                .collect();
 
                             sb.source_file.push(format!(
                                 "\n#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {end}{generics}{{}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
@@ -659,6 +678,7 @@ fn add_ty<'tcx>(
                         let mut last_offset = Size::from_bytes(0);
                         let mut pad_count = 0;
                         let mut fields = String::new();
+                        let mut rust_fields = String::new();
                         for (field_idx, offset) in &offsets {
                             if *offset != last_offset {
                                 assert!(offset.bytes() > last_offset.bytes());
@@ -681,7 +701,7 @@ fn add_ty<'tcx>(
                                 .to_string()
                                 .chars()
                                 .next()
-                                .is_some_and(|c| c.is_alphabetic())
+                                .is_some_and(char::is_alphabetic)
                             {
                                 field_def.name.to_string()
                             } else {
@@ -690,6 +710,16 @@ fn add_ty<'tcx>(
                             fields.push_str(&format!(
                                 "{} {field_name};\n",
                                 c_type_string(field_def.ty(tcx, gargs), tcx, sb, instance)
+                            ));
+                            rust_fields.push_str(&format!(
+                                "{field_name}:{},\n",
+                                crate::rust::rust_type_string(
+                                    field_def.ty(tcx, gargs),
+                                    tcx,
+                                    sb,
+                                    instance,
+                                    true
+                                )
                             ));
                             last_offset = *offset + size(field_def.ty(tcx, gargs), tcx);
                         }
@@ -711,12 +741,20 @@ fn add_ty<'tcx>(
                                     "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                                 ));
                             }
+                            sb.add_rust_if_missing(
+                                &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
+                                &name.replace('$',"ds"),
+                            );
                         } else {
                             sb.source_file.push(format!(
                                 "#ifndef _RUST_TY_DEF_{name}\n{template_preifx}struct {align}{name}{generics}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
                             sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
+                            sb.add_rust_if_missing(
+                                &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
+                                &name.replace('$',"ds"),
+                            );
                         }
                     }
                     FieldsShape::Union(_) => {
@@ -890,7 +928,7 @@ fn add_ty<'tcx>(
     sb.defined_tys.insert(t);
 }
 pub fn create_shim(fn_name: &str) -> String {
-    const SHIM_NAME: &str = "rust_to_c_shim";
+    const SHIM_NAME: &str = "c_to_rust_shim";
     if !fn_name.ends_with('E') {
         return format!("{fn_name}{SHIM_NAME}");
     }
@@ -1016,16 +1054,23 @@ fn primitive_to_type(primitive: rustc_target::abi::Primitive) -> &'static str {
 pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
     let demangled = format!("{:#}", rustc_demangle::demangle(symbol));
     if !demangled.contains(['.', '>', '{', '}']) {
+        let last = demangled.split("::").count() - 1;
         Some(
             demangled
                 .split("::")
-                .map(|e| {
-                    let res = e.to_string();
+                .enumerate()
+                .map(|(idx, e)| {
+                    let res = if idx == last {
+                        e.to_string().to_lowercase()
+                    } else {
+                        e.to_string()
+                    };
                     match e {
                         "float" => "_float".to_string(),
                         "int" => "_int".to_string(),
                         "char" => "_char".to_string(),
                         "private" => "_private".to_string(),
+                        "new" => "_new".to_string(),
                         _ => res,
                     }
                 })

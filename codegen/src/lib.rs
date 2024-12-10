@@ -1,4 +1,10 @@
-#![feature(rustc_private, iter_intersperse, int_roundings, let_chains)]
+#![feature(
+    rustc_private,
+    iter_intersperse,
+    int_roundings,
+    let_chains,
+    hash_set_entry
+)]
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
@@ -194,13 +200,6 @@ impl CodegenBackend for CBackend {
                 .unwrap()
                 .write_all(header.bytes())
                 .unwrap();
-            let out = std::process::Command::new("g++")
-                .arg(&header_path)
-                .arg("-fsyntax-only")
-                .arg("-std=c++20")
-                .output()
-                .expect("Could not run a syntax check using g++");
-            assert!(out.status.success(), "{out:?}");
             let rust_bridge_source = outputs
                 .temp_path_ext("rs_bridge", Some(&name))
                 .with_file_name(&name)
@@ -209,6 +208,14 @@ impl CodegenBackend for CBackend {
                 .unwrap()
                 .write_all(rs_bridge.bytes())
                 .unwrap();
+            let out = std::process::Command::new("g++")
+                .arg(&header_path)
+                .arg("-fsyntax-only")
+                .arg("-std=c++20")
+                .output()
+                .expect("Could not run a syntax check using g++");
+            assert!(out.status.success(), "{out:?}");
+
             let rust_bridge_lib = outputs
                 .temp_path_ext("elf", Some(&name))
                 .with_file_name(&name)

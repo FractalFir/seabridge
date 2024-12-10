@@ -1,3 +1,4 @@
+use crate::monomorphize;
 use crate::souce_builder::{self, CSourceBuilder};
 use rustc_middle::mir::mono::MonoItemData;
 use rustc_middle::ty::FloatTy;
@@ -104,12 +105,13 @@ pub fn rust_type_string<'tcx>(
     instance: Instance<'tcx>,
     c_safe: bool,
 ) -> String {
+    let ty = monomorphize(instance, ty, tcx);
     match ty.kind() {
         TyKind::Int(_) | TyKind::Uint(_) | TyKind::Float(_) | TyKind::Bool => format!("{ty:?}"),
         TyKind::Char => "u32".into(),
         TyKind::Ref(_, inner, mutability) | TyKind::RawPtr(inner, mutability) => {
             let mutability = match mutability {
-                Mutability::Not => "",
+                Mutability::Not => "const",
                 Mutability::Mut => "mut",
             };
             if crate::is_fat_ptr(ty, tcx, instance) {
@@ -132,21 +134,79 @@ pub fn rust_type_string<'tcx>(
                             )
                         }
                     }
-                    TyKind::Dynamic(_, _, _) =>  if c_safe {"RustDyn".into()} else{
-                        "*const [u8]".into()
-                    },
+                    TyKind::Dynamic(_, _, _) => {
+                        if c_safe {
+                            "RustDyn".into()
+                        } else {
+                            "*const [u8]".into()
+                        }
+                    }
                     _ => format!("RustFatPtr",),
                 }
             } else if souce_builder::is_zst(*inner, tcx) {
-                format!("&{mutability} ()")
+                format!("*{mutability} ()")
             } else {
                 format!(
-                    "&{mutability} {}",
+                    "*{mutability} {}",
                     rust_type_string(*inner, tcx, source_builder, instance, c_safe)
                 )
             }
         }
-
+        TyKind::Adt(def, gargs) => {
+            let adt_instance =
+                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
+                    .unwrap()
+                    .unwrap();
+            // Get the mangled path: it is absolute, and not poluted by types being rexported
+            crate::instance_ident(adt_instance, tcx).replace('$', "ds")
+        }
+        TyKind::Closure(did, gargs) => {
+            let adt_instance =
+                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)
+                    .unwrap()
+                    .unwrap();
+            // Get the mangled path: it is absolute, and not poluted by types being rexported
+            crate::instance_ident(adt_instance, tcx).replace('$', "ds")
+        }
+        TyKind::Tuple(elements) => {
+            if elements.is_empty() {
+                "()".into()
+            } else if c_safe {
+                format!("{}", crate::function::mangle(ty, tcx))
+            } else {
+                format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(|ty| rust_type_string(ty, tcx, source_builder, instance, c_safe))
+                        .intersperse(",".to_string())
+                        .collect::<String>()
+                )
+            }
+        }
+        TyKind::Slice(_) => "RawSlice".into(),
+        TyKind::Array(elem, length) => format!(
+            "[{elem};{length}]",
+            elem = rust_type_string(*elem, tcx, source_builder, instance, c_safe)
+        ),
+        TyKind::Never => {
+            if c_safe {
+                eprintln!("Never in C.");
+                "!".into()
+            } else {
+                "!".into()
+            }
+        }
+        TyKind::FnDef(_, _) => {
+            if c_safe {
+                eprintln!("FnDef in C.");
+                "()".into()
+            } else {
+                "()".into()
+            }
+        }
+        TyKind::FnPtr(_, _) => "*const ()".to_owned(),
+        TyKind::Dynamic(_, _, _) => "Dynamic".into(),
         _ => todo!("Can't convert {ty:?} to a Rust type."),
     }
 }

@@ -342,12 +342,6 @@ pub fn c_type_string<'tcx>(
                     .unwrap()
                     .unwrap();
             // Get the mangled path: it is absolute, and not poluted by types being rexported
-            let layout = tcx
-                .layout_of(PseudoCanonicalInput {
-                    typing_env: TypingEnv::fully_monomorphized(),
-                    value: ty,
-                })
-                .expect("Could not compute the layout of a type.");
             let ident = crate::instance_ident(adt_instance, tcx);
             let generic_string =
                 crate::souce_builder::generic_string(gargs, tcx, source_builder, instance);
