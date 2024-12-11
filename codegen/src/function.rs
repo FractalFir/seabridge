@@ -24,6 +24,12 @@ use crate::souce_builder::is_zst;
 use crate::souce_builder::CSourceBuilder;
 
 use std::fmt::Write;
+fn is_public<'tcx>(finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
+    if !finstance.def_id().is_local() {
+        return true;
+    }
+    tcx.visibility(finstance.def_id()).is_public()
+}
 /// Compiles a function into a C function defintion.
 pub(crate) fn compile_function<'tcx>(
     finstance: Instance<'tcx>,
@@ -34,8 +40,9 @@ pub(crate) fn compile_function<'tcx>(
     if source_builder.is_defined(finstance) {
         return;
     }
-    let visibility = tcx.visibility(finstance.def_id());
-    if !visibility.is_public() {
+
+    // Skip non-public functions
+    if !is_public(finstance, tcx) {
         return;
     }
     source_builder.add_fn_def(finstance, tcx);
@@ -229,14 +236,18 @@ pub fn c_type_string<'tcx>(
             elem = c_type_string(*elem, tcx, source_builder, instance)
         ),
         TyKind::RawPtr(inner, mutability) | TyKind::Ref(_, inner, mutability) => {
-            let mutability = match mutability {
+            let mutability_str = match mutability {
                 Mutability::Not => "const",
                 Mutability::Mut => "",
             };
             if crate::is_fat_ptr(ty, tcx, instance) {
                 match inner.kind() {
                     TyKind::Str => {
-                        format!("RustStr")
+                        let mutability = match mutability {
+                            Mutability::Not => false,
+                            Mutability::Mut => true,
+                        };
+                        format!("RustStr<{mutability}>")
                     }
                     TyKind::Slice(elem) => {
                         let tpe = c_type_string(*elem, tcx, source_builder, instance);
@@ -249,10 +260,10 @@ pub fn c_type_string<'tcx>(
                     ),
                 }
             } else if is_zst(*inner, tcx) {
-                format!("void {mutability}*")
+                format!("void {mutability_str}*")
             } else {
                 format!(
-                    "{} {mutability}*",
+                    "{} {mutability_str}*",
                     c_type_string(*inner, tcx, source_builder, instance)
                 )
             }

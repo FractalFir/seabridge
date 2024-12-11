@@ -8,6 +8,7 @@ use rustc_middle::ty::Instance;
 use rustc_middle::ty::IntTy;
 use rustc_middle::ty::List;
 use rustc_middle::ty::Mutability;
+use rustc_middle::ty::ParamTy;
 use rustc_middle::ty::PseudoCanonicalInput;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
@@ -56,7 +57,7 @@ class RustDyn{
 #endif\n";
 /// Builtin, layout-compatible C++ repr of Rust *str
 const RUST_STR: &str = "#ifndef RUST_STR
-struct RustStr{
+template<bool> struct RustStr{
     char32_t* utrf8_data;
     uintptr_t len;
 };
@@ -205,6 +206,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
     /// Adds a rust defitioninon with given `uid`, guaranteeing that no duplicates exist.
     /// This is a workaround for some nasty `C` issues.
     pub fn add_rust_if_missing(&mut self, s: &str, uid: &str) {
+        assert!(!s.contains('$'));
         match self.rust_uids.entry(uid.to_string()) {
             std::collections::hash_set::Entry::Occupied(_) => (),
             std::collections::hash_set::Entry::Vacant(vacant_entry) => {
@@ -240,6 +242,8 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.source_file.push("struct usize{uintptr_t i;};\n");
         res.source_file.push("struct RustChar{uint32_t i;};\n");
         res.source_file.push("struct RustFn;\n");
+        res.source_file.push("#define RUST_IMMUTABLE false\n");
+        res.source_file.push("#define RUST_MUTABLE true\n");
         res.source_file
             .push("template<typename... Types> struct RustTuple;\n");
         res.source_file.push("#undef unix\n");
@@ -250,16 +254,19 @@ impl<'tcx> CSourceBuilder<'tcx> {
             .push("struct ptr_pair{void* addr; void* meta;};\n");
 
         res.rust_file.push("#![feature(slice_ptr_get)]\n");
-        res.rust_file.push("#![allow(non_camel_case_types)]");
-        res.rust_file.push("#[repr(C)]
+        res.rust_file.push("#![allow(non_camel_case_types,unreachable_code)]");
+        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]
 pub struct RustStr{ptr:*const char, len:usize}
 impl Into<*const str> for RustStr{
     fn into(self) -> *const str { 
         unsafe{std::slice::from_raw_parts(self.ptr as *const u8,self.len) as *const [u8] as *const str}
     }
 }");
+        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct RustFatPtr{ptr:*const char, meta:usize}\n");
+        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct RawSlice;\n");
+        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct Dynamic;\n");
         res.rust_file.push(
-            "#[repr(C)]
+            "#[derive(Clone,Copy)]#[repr(C)]
 pub struct RustSlice{ptr:*const char, len:usize}
 impl<T> Into<*const [T]> for RustSlice{
     fn into(self) -> *const [T]{ 
@@ -268,7 +275,7 @@ impl<T> Into<*const [T]> for RustSlice{
 }",
         );
         res.rust_file.push(
-            "#[repr(C)]
+            "#[derive(Clone,Copy)]#[repr(C)]
 pub struct RustDyn{ptr:*const u8, len:usize}
 impl<T> Into<*const [T]> for RustDyn{
     fn into(self) -> *const [T]{ 
@@ -320,7 +327,12 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 "{call_shim}\n",
                 call_shim = crate::function::call_shim(finstance, tcx, &shim_symbol, self)
             );
-            let adt_instance = Instance::try_resolve(
+            // Check if  this function is not representable in C++ due to C++ limitations
+            if unsuported_garg_in_sig(finstance, tcx) {
+                eprintln!("WARNING:{finstance:?} contains gargs which are not representable in C++. Skipping.");
+                return;
+            }
+            let generic_instance = Instance::try_resolve(
                 tcx,
                 TypingEnv::fully_monomorphized(),
                 finstance.def_id(),
@@ -330,9 +342,11 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
             .unwrap();
             let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
                 tcx,
-                adt_instance.def_id(),
+                generic_instance.def_id(),
             );
-            if let None = self.add_fn_template(Instance::new(adt_instance.def_id(), poly_gargs), tcx){
+            if let None =
+                self.add_fn_template(Instance::new(generic_instance.def_id(), poly_gargs), tcx)
+            {
                 return;
             }
             if let Some(path) = symbol_to_path(&fn_name) {
@@ -355,12 +369,17 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 let template = if generic_string.is_empty() {
                     String::new()
                 } else {
-                    format!("template{generic_string}")
+                    format!("template<>")
                 };
 
-                let decl = crate::function::fn_decl(finstance, tcx, self, end);
+                let decl = crate::function::fn_decl(
+                    finstance,
+                    tcx,
+                    self,
+                    &format!("{end}{generic_string}"),
+                );
                 self.source_file
-                    .push(format!("extern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template}{decl}{{{body}}} }}\n",));
+                    .push(format!("extern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template} {decl}{{{body}}} }}\n",));
                 self.source_file.push(";\n");
             } else {
                 let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
@@ -421,7 +440,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
         self.delayed_typedefs.push_front(ty);
     }
     /// Creates function template for a C function.
-    fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) ->Option<()>{
+    fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> Option<()> {
         if self.is_declared(genetric_fn) {
             return None;
         }
@@ -485,7 +504,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
         }
         let inputs = inputs.iter().enumerate().map(|(arg_idx,arg)|{if is_generic(*arg){
             if let TyKind::Param(param) = arg.kind(){
-                Some(format!("T{idx} a{arg_idx}",idx = param.index))
+                Some(format!("{} a{arg_idx}", paramidx_to_name(*param,genetric_fn.args)))
             }else{
                 eprintln!("Skipping template declaration for {fn_name} cause it has a generic(is_generic) arg.");
                None
@@ -495,16 +514,23 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
             assert!(!matches!(arg.kind(),TyKind::Param(_)));
             Some(format!("{} a{arg_idx}",c_type_string(*arg, tcx, self, genetric_fn)))
         }}).collect::<Option<Vec<String>>>()?;
-        let inputs = inputs.into_iter().intersperse(",".into()).collect::<String>();
+        let inputs = inputs
+            .into_iter()
+            .intersperse(",".into())
+            .collect::<String>();
         let ret = if is_generic(ret) {
             if let TyKind::Param(param) = ret.kind() {
-                format!("T{idx}", idx = param.index)
+                paramidx_to_name(*param, genetric_fn.args)
             } else {
                 eprintln!("Skipping template declaration for {fn_name} cause it has a generic(is_generic) return.");
                 return None;
             }
         } else {
-            c_type_string(ret, tcx, self, genetric_fn)
+            if is_zst(ret, tcx) {
+                "void".into()
+            } else {
+                c_type_string(ret, tcx, self, genetric_fn)
+            }
         };
 
         let decl = format!("{ret} {end}({inputs})");
@@ -568,13 +594,13 @@ fn add_ty<'tcx>(
                     let mut last_offset = Size::from_bytes(0);
                     let mut pad_count = 0;
                     let mut fields = String::new();
+                    let mut rust_fields = String::new();
                     for (field_idx, offset) in &offsets {
                         if *offset != last_offset {
                             assert!(offset.bytes() > last_offset.bytes());
-                            fields.push_str(&format!(
-                                "uint8_t pad_{pad_count}[{}];\n",
-                                offset.bytes() - last_offset.bytes()
-                            ));
+                            let pad_size = offset.bytes() - last_offset.bytes();
+                            fields.push_str(&format!("uint8_t pad_{pad_count}[{pad_size}];\n",));
+                            rust_fields.push_str(&format!("pad_{pad_count}:[u8;{pad_size}],"));
                             pad_count += 1;
                         }
                         let field_ty = elems[field_idx.as_usize()];
@@ -586,6 +612,10 @@ fn add_ty<'tcx>(
                         fields.push_str(&format!(
                             "{} {field_name};\n",
                             c_type_string(field_ty, tcx, sb, instance)
+                        ));
+                        rust_fields.push_str(&format!(
+                            "{field_name}:{},",
+                            rust_type_string(field_ty, tcx, sb, instance, true)
                         ));
                         last_offset = *offset + size(field_ty, tcx);
                     }
@@ -600,6 +630,11 @@ fn add_ty<'tcx>(
                     } else {
                         String::new()
                     };
+                    let mangled_name = mangle(t, tcx);
+                    sb.add_rust_if_missing(
+                        &format!("#[derive(Clone,Copy)]#[repr(C)]\nstruct {mangled_name}{{{rust_fields}}}\n"),
+                        &mangled_name,
+                    );
                     sb.source_file.push(format!(
                         "template <> struct {align}RustTuple{generic_string}{{\n{fields}}};\n"
                     ));
@@ -800,8 +835,11 @@ fn add_ty<'tcx>(
                         };
                         if let Some(path) = symbol_to_path(&name) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
-                            let namespace: String =
-                                beg.iter().map(|s| s.as_str()).intersperse("::").collect();
+                            let namespace: String = beg
+                                .iter()
+                                .map(std::string::String::as_str)
+                                .intersperse("::")
+                                .collect();
                             if def.adt_kind() == AdtKind::Enum {
                                 sb.source_file.push(format!(
                                     "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}union {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
@@ -811,9 +849,10 @@ fn add_ty<'tcx>(
                                     "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                                 ));
                             }
+                            let name = name.replace('$', "ds");
                             sb.add_rust_if_missing(
-                                &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
-                                &name.replace('$', "ds"),
+                                &format!("#[derive(Clone,Copy)]#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
+                                &name,
                             );
                         } else {
                             sb.source_file.push(format!(
@@ -821,14 +860,17 @@ fn add_ty<'tcx>(
                             ));
                             sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
+
+                            let name = name.replace('$', "ds");
                             sb.add_rust_if_missing(
-                                &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
-                                &name.replace('$', "ds"),
+                                &format!("#[derive(Clone,Copy)]#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
+                                &name
                             );
                         }
                     }
                     FieldsShape::Union(_) => {
                         let mut fields = String::new();
+                        let mut rust_fields = String::new();
                         for field_def in def.all_fields() {
                             add_ty(sb, tcx, field_def.ty(tcx, gargs), instance);
                             if is_zst(
@@ -852,6 +894,10 @@ fn add_ty<'tcx>(
                                 "{} {field_name};\n",
                                 c_type_string(field_def.ty(tcx, gargs), tcx, sb, instance)
                             ));
+                            rust_fields.push_str(&format!(
+                                "{field_name}:{}",
+                                rust_type_string(field_def.ty(tcx, gargs), tcx, sb, instance, true)
+                            ));
                         }
                         let align = if sb.is_align_attr_supported() {
                             format!("__attribute__ ((aligned ({})))\n", layout.align.abi.bytes())
@@ -860,17 +906,30 @@ fn add_ty<'tcx>(
                         };
                         if let Some(path) = symbol_to_path(&name) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
-                            let namespace: String =
-                                beg.iter().map(std::string::String::as_str).intersperse("::").collect();
+                            let namespace: String = beg
+                                .iter()
+                                .map(std::string::String::as_str)
+                                .intersperse("::")
+                                .collect();
                             sb.source_file.push(format!(
                                 "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}union {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
+                            let name = name.replace('$', "ds");
+                            sb.add_rust_if_missing(
+                                &format!("#[derive(Clone,Copy)]#[repr(C)]\n union {name}{{{rust_fields}}}\n"),
+                                &name,
+                            );
                         } else {
                             sb.source_file.push(format!(
                                 "#ifndef _RUST_TY_DEF_{name}\n{template_preifx}union {align}{name}{generics}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
                             sb.assert_sizeof(&format!("union {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("union {name}"), layout.align.abi.bytes());
+                            let name = name.replace('$', "ds");
+                            sb.add_rust_if_missing(
+                                &format!("#[derive(Clone,Copy)]#[repr(C)]\n union {name}{{{rust_fields}}}\n"),
+                                &name,
+                            );
                         }
                     }
                     FieldsShape::Array { .. } => {
@@ -957,8 +1016,8 @@ fn add_ty<'tcx>(
                                     if offsets.is_empty() {
                                         None
                                     } else {
-                                        let variant_name = format!("{name}{variant_name}");
-                                        Some((format!("struct{{\n{fields}}} {variant_name};\n"),(variant_name.clone(),format!("#[repr(C)]\nstruct {variant_name}{{{rust_fields}}}\n"))))
+                                        let full_variant_name = format!("{name}{variant_name}").replace('$',"ds");
+                                        Some((format!("struct{{\n{fields}}} {variant_name};\n"),(full_variant_name.clone(),format!("#[repr(C)]\n#[derive(Clone,Copy)]\nstruct {full_variant_name}{{{rust_fields}}}\n"))))
                                     }
                                 }
                                 _ => todo!("Unhandled variant layout: {:?}", layout.fields),
@@ -994,9 +1053,9 @@ fn add_ty<'tcx>(
                         });
                     let rust_enum_fields = varaints
                         .iter()
-                        .map(|(_, (variant_name, _))| format!("{variant_name}:{variant_name}"))
+                        .map(|(_, (variant_name, _))| format!("\t{variant_name}:{variant_name},\n"))
                         .collect::<String>();
-                    sb.add_rust_if_missing(&format!("union {name}{{tag:RustTag<{tag_offset},{primitive}>,{rust_enum_fields}}}\n",primitive = primitive_to_rust_type(tag.primitive())), &name);
+                    sb.add_rust_if_missing(&format!("#[derive(Clone,Copy)]#[repr(C)]\nunion {name}{{tag:RustTag<{tag_offset},{primitive}>,{rust_enum_fields}}}\n",primitive = primitive_to_rust_type(tag.primitive()),name = name.replace('$',"ds")), &name);
                     if let Some(path) = symbol_to_path(&name) {
                         let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                         let namespace: String =
@@ -1183,17 +1242,18 @@ pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
                 .enumerate()
                 .map(|(idx, e)| {
                     let res = if idx == last {
-                        e.to_string().to_lowercase()
-                    } else {
                         e.to_string()
+                    } else {
+                        e.to_string().to_lowercase()
                     };
-                    match e {
+                    match res.as_str() {
                         "float" => "_float".to_string(),
                         "int" => "_int".to_string(),
                         "char" => "_char".to_string(),
                         "private" => "_private".to_string(),
                         "new" => "_new".to_string(),
                         "typeid" => "_typeid".to_string(),
+                        "and" => "_and".to_string(),
                         _ => res,
                     }
                 })
@@ -1214,14 +1274,18 @@ pub fn generic_ty_string<'tcx>(
         TyKind::Int(IntTy::Isize) => "isize".into(),
         TyKind::Char => "RustChar".into(),
         TyKind::RawPtr(inner, mutability) | TyKind::Ref(_, inner, mutability) => {
-            let mutability = match mutability {
+            let mutability_str = match mutability {
                 Mutability::Not => "const",
                 Mutability::Mut => "",
             };
             if crate::is_fat_ptr(ty, tcx, instance) {
                 match inner.kind() {
                     TyKind::Str => {
-                        format!("RustStr")
+                        let mutability = match mutability {
+                            Mutability::Not => false,
+                            Mutability::Mut => true,
+                        };
+                        format!("RustStr<{mutability}>")
                     }
                     TyKind::Slice(elem) => {
                         let tpe = generic_ty_string(*elem, tcx, source_builder, instance);
@@ -1234,10 +1298,10 @@ pub fn generic_ty_string<'tcx>(
                     ),
                 }
             } else if is_zst(*inner, tcx) {
-                format!("void {mutability}*")
+                format!("void {mutability_str}*")
             } else {
                 format!(
-                    "{} {mutability}*",
+                    "{} {mutability_str}*",
                     generic_ty_string(*inner, tcx, source_builder, instance)
                 )
             }
@@ -1372,10 +1436,12 @@ fn is_generic(ty: Ty) -> bool {
             .filter_map(|garg| garg.as_type())
             .any(|ty| is_generic(ty)),
         TyKind::Alias(_, _) => true,
-        TyKind::FnPtr(binder, _) => if let Some(inner) = binder.no_bound_vars(){
-            inner.inputs_and_output.iter().any(|ty| is_generic(ty))
-        } else{
-            false
+        TyKind::FnPtr(binder, _) => {
+            if let Some(inner) = binder.no_bound_vars() {
+                inner.inputs_and_output.iter().any(|ty| is_generic(ty))
+            } else {
+                false
+            }
         }
         TyKind::Error(_) => true,
         //_=>todo!("Can't determine if {ty:?} is generic")
@@ -1414,4 +1480,44 @@ fn display_ty_kind(ty: Ty) {
             //_=>todo!("Can't determine if {ty:?} is generic")
         }
     );
+}
+fn paramidx_to_name(param: ParamTy, gargs: &List<GenericArg>) -> String {
+    let mut c_idx = 0;
+    let mut t_idx = 0;
+    for (curr_idx, garg) in gargs.iter().enumerate() {
+        if let Some(_) = garg.as_type() {
+            if curr_idx as u32 == param.index {
+                return format!("T{t_idx}");
+            }
+            t_idx += 1;
+        } else {
+            let Some(_) = garg.as_const() else {
+                continue;
+            };
+            if curr_idx as u32 == param.index {
+                return format!("TC{c_idx}");
+            }
+            c_idx += 1;
+        }
+    }
+    panic!()
+}
+/// Checks if the function contains a specific combo of of types / generics that make creating a template for it impossible/nearly impossible.
+fn unsuported_garg_in_sig<'tcx>(instance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
+    // TODO: this just checks if it is *possible* for one of gargs to cause an issue, but this may be too conservative.
+    // TODO: make this recursive.
+    instance
+        .args
+        .iter()
+        .filter_map(rustc_middle::ty::GenericArg::as_type)
+        .any(|ty| match ty.kind() {
+            // Needed because `char32_t` and `uint32_t` are not distinct types in C++.
+            TyKind::Char => true,
+            // Needed because `uintptr_t` and `uint{pointer_size}_t` are not distinct types in C++.
+            TyKind::Uint(UintTy::Usize) | TyKind::Int(IntTy::Isize) => true,
+            // Zero sized, and not present in some sigs.
+            TyKind::FnDef(_, _) => true,
+            TyKind::Closure(_, _) => is_zst(ty, tcx),
+            _ => false,
+        })
 }

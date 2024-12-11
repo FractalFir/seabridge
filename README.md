@@ -2,13 +2,14 @@
 
 **WARNING: This tool is in early research phase. It paritaly works, but it has some *very* rough edges and is nothing more than a tech demo ATM.**
 
-**Since it is so early in developement, this README may not be up to date. While I try to be clear about what is implemented and planned,**
+**Since it is so early in developement, this README may not be up to date and is likelly riddled with spelling/other mistakes. Sorry.**
+**While I try to be clear about what is implemented and planned,**
 **it is important to note that many features are still quite buggy.**
 
 Seabridge is an experimental tool, which uses rich type information from the rust compiler to generate high-quality C++ bindings to Rust code.
 
 Thanks to this unqiue, deep access to the internal state of the compiler,
-sebaridge can generate C++ bindings to all Rust types(DONE, bit buggy), functions(WIP, demangled + generic support but no shims yet), and statics(WIP, no demangling yet). 
+sebaridge can generate C++ bindings to all Rust types(DONE, bit buggy), functions(WIP, demangled + generic support + shims, still bit buggy and limited), and statics(WIP, no demangling yet). 
 
 This(in theory) will allow you to *just* use a Rust crate inside a C++ codebase, without much setup. The tool is also able to translate high level Rust concepts, like generics, into C++ equivalents(templates).
 
@@ -70,10 +71,10 @@ int main() {
 	RustTuple<int32_t,double,RustSlice> args = {8,3.14159,slice};
 	// Just call a Rust function
 	alloc::boxed::Box<int32_t> rust_box = my_crate::my_fn(args);
-	// Box<int32_t> will get dropped, automaticaly
+
 }
 ```
-Seabridge will also translate all `Drop` impls into C++ destructors.
+Seabridge will also(in the future!) translate  `Drop` impls into C++ destructors.
 
 # LICENSE
 
