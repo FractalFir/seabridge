@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::rust::rust_type_string;
+use crate::rustc_middle::ty::TypeVisitableExt;
 use rustc_middle::ty::AdtKind;
 use rustc_middle::ty::GenericArg;
 use rustc_middle::ty::Instance;
@@ -279,6 +281,13 @@ impl<T> Into<RustDyn> for *const [T]{
     }
 }",
         );
+        res.rust_file.push(
+            "#[repr(C)]#[derive(Clone,Copy)]
+struct RustTag<const TAG_OFFSET:usize,Tag>{
+    offset:[u8;TAG_OFFSET],
+    tag:Tag,
+}",
+        );
         res
     }
     /// Checks if the target `C` compiler supports the `restrict` keyword.
@@ -311,6 +320,21 @@ impl<T> Into<RustDyn> for *const [T]{
                 "{call_shim}\n",
                 call_shim = crate::function::call_shim(finstance, tcx, &shim_symbol, self)
             );
+            let adt_instance = Instance::try_resolve(
+                tcx,
+                TypingEnv::fully_monomorphized(),
+                finstance.def_id(),
+                finstance.args,
+            )
+            .unwrap()
+            .unwrap();
+            let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
+                tcx,
+                adt_instance.def_id(),
+            );
+            if let None = self.add_fn_template(Instance::new(adt_instance.def_id(), poly_gargs), tcx){
+                return;
+            }
             if let Some(path) = symbol_to_path(&fn_name) {
                 //
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
@@ -396,16 +420,19 @@ impl<T> Into<RustDyn> for *const [T]{
     pub fn delay_typedef(&mut self, ty: Ty<'tcx>) {
         self.delayed_typedefs.push_front(ty);
     }
-    /*
-    fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
+    /// Creates function template for a C function.
+    fn add_fn_template(&mut self, genetric_fn: Instance<'tcx>, tcx: TyCtxt<'tcx>) ->Option<()>{
         if self.is_declared(genetric_fn) {
-            return;
+            return None;
         }
         let fn_name = crate::instance_ident(genetric_fn, tcx)
             .to_string()
             .replace('.', "_");
         let Some(path) = symbol_to_path(&fn_name) else {
-            panic!()
+            eprintln!(
+                "Skipping template declaration for {fn_name} cause it can't be turned into a path."
+            );
+            return None;
         };
         let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
         let namespace: String = beg
@@ -438,15 +465,57 @@ impl<T> Into<RustDyn> for *const [T]{
         } else {
             format!("template<{garg_body}> ")
         };
-        // TODO: fullt
-        let decl = format!(""end;
+        // TODO: fully
+        let polyfn_sig = tcx.fn_sig(genetric_fn.def_id());
+        let ret = if let Some(ret) = (polyfn_sig.skip_binder()).output().no_bound_vars() {
+            ret
+        } else {
+            eprintln!("Skipping template declaration for {fn_name} cause it has a generic return.");
+            return None;
+        };
+        let inputs = if let Some(ret) = (polyfn_sig.skip_binder()).inputs().no_bound_vars() {
+            ret
+        } else {
+            eprintln!("Skipping template declaration for {fn_name} cause it has a generic arg.");
+            return None;
+        };
+        if ret.has_bound_vars() {
+            eprintln!("Skipping template declaration for {fn_name} cause it has a generic(has_escaping_bound_vars) return.");
+            return None;
+        }
+        let inputs = inputs.iter().enumerate().map(|(arg_idx,arg)|{if is_generic(*arg){
+            if let TyKind::Param(param) = arg.kind(){
+                Some(format!("T{idx} a{arg_idx}",idx = param.index))
+            }else{
+                eprintln!("Skipping template declaration for {fn_name} cause it has a generic(is_generic) arg.");
+               None
+            }
+        }else {
+            eprintln!("arg:{arg:?}");
+            assert!(!matches!(arg.kind(),TyKind::Param(_)));
+            Some(format!("{} a{arg_idx}",c_type_string(*arg, tcx, self, genetric_fn)))
+        }}).collect::<Option<Vec<String>>>()?;
+        let inputs = inputs.into_iter().intersperse(",".into()).collect::<String>();
+        let ret = if is_generic(ret) {
+            if let TyKind::Param(param) = ret.kind() {
+                format!("T{idx}", idx = param.index)
+            } else {
+                eprintln!("Skipping template declaration for {fn_name} cause it has a generic(is_generic) return.");
+                return None;
+            }
+        } else {
+            c_type_string(ret, tcx, self, genetric_fn)
+        };
+
+        let decl = format!("{ret} {end}({inputs})");
         self.source_file.push(format!(
             "namespace {namespace}{{ /*fn template*/
 {template}{decl}; }}",
         ));
         self.source_file.push(";\n");
         self.set_declared(genetric_fn);
-    }*/
+        Some(())
+    }
 }
 /// Adds the type `t` to `sb`
 #[allow(clippy::too_many_lines)]
@@ -629,6 +698,7 @@ fn add_ty<'tcx>(
             );
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             let name = crate::instance_ident(adt_instance, tcx);
+            eprintln!("{t:?}");
             let layout = tcx
                 .layout_of(PseudoCanonicalInput {
                     typing_env: TypingEnv::fully_monomorphized(),
@@ -743,7 +813,7 @@ fn add_ty<'tcx>(
                             }
                             sb.add_rust_if_missing(
                                 &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
-                                &name.replace('$',"ds"),
+                                &name.replace('$', "ds"),
                             );
                         } else {
                             sb.source_file.push(format!(
@@ -753,7 +823,7 @@ fn add_ty<'tcx>(
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
                             sb.add_rust_if_missing(
                                 &format!("#[repr(C)]\nstruct {name}{{\n{rust_fields}}}\n"),
-                                &name.replace('$',"ds"),
+                                &name.replace('$', "ds"),
                             );
                         }
                     }
@@ -791,7 +861,7 @@ fn add_ty<'tcx>(
                         if let Some(path) = symbol_to_path(&name) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String =
-                                beg.iter().map(|s| s.as_str()).intersperse("::").collect();
+                                beg.iter().map(std::string::String::as_str).intersperse("::").collect();
                             sb.source_file.push(format!(
                                 "#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}union {align}{end}{generics}{{\n{fields}}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
@@ -814,10 +884,10 @@ fn add_ty<'tcx>(
                     variants,
                 } => {
                     assert_eq!(variants.len(), def.variants().len());
-                    let varaint_string: String = variants
+                    let varaints: Vec<(String,(String,String))> = variants
                         .into_iter()
                         .zip(def.variants())
-                        .map(|(layout_variant, adt_variant)| {
+                        .filter_map(|(layout_variant, adt_variant)| {
                             match &layout_variant.fields {
                                 FieldsShape::Primitive => panic!(
                                     "type {name} has primitive layout, but is not primitive."
@@ -835,13 +905,15 @@ fn add_ty<'tcx>(
                                     let mut last_offset = Size::from_bytes(0);
                                     let mut pad_count = 0;
                                     let mut fields = String::new();
+                                    let mut rust_fields = String::new();
                                     for (field_idx, offset) in &offsets {
                                         if *offset != last_offset {
                                             assert!(offset.bytes() > last_offset.bytes());
+                                            let pad_size =  offset.bytes() - last_offset.bytes();
                                             fields.push_str(&format!(
-                                                "uint8_t pad_{pad_count}[{}];\n",
-                                                offset.bytes() - last_offset.bytes()
+                                                "uint8_t pad_{pad_count}[{pad_size}];\n",
                                             ));
+                                            rust_fields.push_str(&format!("pad{pad_count}:[u8;{pad_size}],"));
                                             pad_count += 1;
                                         }
                                         let field_def = &adt_variant.fields[*field_idx];
@@ -869,13 +941,24 @@ fn add_ty<'tcx>(
                                                 instance
                                             )
                                         ));
+                                        rust_fields.push_str(&format!(
+                                            "{field_name}:{},\n",
+                                            rust_type_string(
+                                                field_def.ty(tcx, gargs),
+                                                tcx,
+                                                sb,
+                                                instance,
+                                                true,
+                                            )
+                                        ));
                                         last_offset = *offset + size(field_def.ty(tcx, gargs), tcx);
                                     }
                                     let variant_name = adt_variant.name.to_string();
                                     if offsets.is_empty() {
-                                        String::new()
+                                        None
                                     } else {
-                                        format!("struct{{\n{fields}}} {variant_name};\n")
+                                        let variant_name = format!("{name}{variant_name}");
+                                        Some((format!("struct{{\n{fields}}} {variant_name};\n"),(variant_name.clone(),format!("#[repr(C)]\nstruct {variant_name}{{{rust_fields}}}\n"))))
                                     }
                                 }
                                 _ => todo!("Unhandled variant layout: {:?}", layout.fields),
@@ -899,6 +982,21 @@ fn add_ty<'tcx>(
                     } else {
                         format!("uint8_t tag_pad[{tag_offset}];")
                     };
+
+                    let varaint_string = varaints
+                        .iter()
+                        .map(|(vs, _)| vs.as_str())
+                        .collect::<String>();
+                    varaints
+                        .iter()
+                        .for_each(|(_, (variant_name, variant_def))| {
+                            sb.add_rust_if_missing(variant_def, variant_name)
+                        });
+                    let rust_enum_fields = varaints
+                        .iter()
+                        .map(|(_, (variant_name, _))| format!("{variant_name}:{variant_name}"))
+                        .collect::<String>();
+                    sb.add_rust_if_missing(&format!("union {name}{{tag:RustTag<{tag_offset},{primitive}>,{rust_enum_fields}}}\n",primitive = primitive_to_rust_type(tag.primitive())), &name);
                     if let Some(path) = symbol_to_path(&name) {
                         let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                         let namespace: String =
@@ -1051,6 +1149,30 @@ fn primitive_to_type(primitive: rustc_target::abi::Primitive) -> &'static str {
         Primitive::Pointer(_) => "void*",
     }
 }
+/// Converts a Primtive to a Rust type string.
+fn primitive_to_rust_type(primitive: rustc_target::abi::Primitive) -> &'static str {
+    use rustc_target::abi::Integer;
+    use rustc_target::abi::Primitive;
+    match primitive {
+        Primitive::Int(int, sign) => match (int, sign) {
+            (Integer::I8, true) => "i8",
+            (Integer::I16, true) => "i16",
+            (Integer::I32, true) => "i32",
+            (Integer::I64, true) => "i64",
+            (Integer::I128, true) => "i128",
+            (Integer::I8, false) => "u8",
+            (Integer::I16, false) => "u16",
+            (Integer::I32, false) => "u32",
+            (Integer::I64, false) => "u64",
+            (Integer::I128, false) => "u128",
+        },
+        Primitive::Float(rustc_abi::Float::F16) => todo!(),
+        Primitive::Float(rustc_abi::Float::F32) => "f32",
+        Primitive::Float(rustc_abi::Float::F64) => "f64",
+        Primitive::Float(rustc_abi::Float::F128) => todo!("No support for 128 bit floats yet!"),
+        Primitive::Pointer(_) => "*const ()",
+    }
+}
 pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
     let demangled = format!("{:#}", rustc_demangle::demangle(symbol));
     if !demangled.contains(['.', '>', '{', '}']) {
@@ -1071,6 +1193,7 @@ pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
                         "char" => "_char".to_string(),
                         "private" => "_private".to_string(),
                         "new" => "_new".to_string(),
+                        "typeid" => "_typeid".to_string(),
                         _ => res,
                     }
                 })
@@ -1213,4 +1336,82 @@ impl<'tcx> rustc_middle::ty::TypeVisitor<TyCtxt<'tcx>> for TemplateGenerator<'tc
             _ => (),
         }
     }
+}
+fn is_generic(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) => is_generic(*inner),
+        TyKind::Tuple(elements) => elements.iter().any(|ty| is_generic(ty)),
+        TyKind::Param(_) => true,
+        TyKind::Adt(_, generics) => generics
+            .iter()
+            .filter_map(|garg| garg.as_type())
+            .any(|ty| is_generic(ty)),
+        TyKind::Slice(inner) => is_generic(*inner),
+        TyKind::Int(_)
+        | TyKind::Uint(_)
+        | TyKind::Float(_)
+        | TyKind::Char
+        | TyKind::Bool
+        | TyKind::Never
+        | TyKind::Str => false,
+        TyKind::Placeholder(_) => true,
+        TyKind::Infer(_) => true,
+        TyKind::Array(elem, length) => is_generic(*elem) | length.try_to_valtree().is_none(),
+        TyKind::Foreign(_) => false,
+        TyKind::Pat(_, _) | TyKind::Bound(_, _) => true,
+        TyKind::Dynamic(_, _, _) => false,
+        TyKind::Closure(_, generics)
+        | TyKind::CoroutineClosure(_, generics)
+        | TyKind::Coroutine(_, generics)
+        | TyKind::CoroutineWitness(_, generics) => generics
+            .iter()
+            .filter_map(|garg| garg.as_type())
+            .any(|ty| is_generic(ty)),
+        TyKind::FnDef(_, generics) => generics
+            .iter()
+            .filter_map(|garg| garg.as_type())
+            .any(|ty| is_generic(ty)),
+        TyKind::Alias(_, _) => true,
+        TyKind::FnPtr(binder, _) => if let Some(inner) = binder.no_bound_vars(){
+            inner.inputs_and_output.iter().any(|ty| is_generic(ty))
+        } else{
+            false
+        }
+        TyKind::Error(_) => true,
+        //_=>todo!("Can't determine if {ty:?} is generic")
+    }
+}
+fn display_ty_kind(ty: Ty) {
+    eprintln!(
+        "{}",
+        match ty.kind() {
+            TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) => "RawPtr",
+            TyKind::Tuple(elements) => "Tuple",
+            TyKind::Param(_) => "Param",
+            TyKind::Adt(_, generics) => "Adt",
+            TyKind::Slice(inner) => "Slice",
+            TyKind::Int(_)
+            | TyKind::Uint(_)
+            | TyKind::Float(_)
+            | TyKind::Char
+            | TyKind::Bool
+            | TyKind::Never
+            | TyKind::Str => "primitive",
+            TyKind::Placeholder(_) => "Placeholder",
+            TyKind::Infer(_) => "Infer",
+            TyKind::Array(elem, length) => "Array",
+            TyKind::Foreign(_) => "Foreign",
+            TyKind::Pat(_, _) | TyKind::Bound(_, _) => "Bound",
+            TyKind::Dynamic(_, _, _) => "Dynamic",
+            TyKind::Closure(_, generics)
+            | TyKind::CoroutineClosure(_, generics)
+            | TyKind::Coroutine(_, generics)
+            | TyKind::CoroutineWitness(_, generics) => "Closure",
+            TyKind::FnDef(_, generics) => "FnDef",
+            TyKind::Alias(_, _) => "Alias",
+            TyKind::FnPtr(_, _) => "FnPtr",
+            TyKind::Error(_) => "Error",
+            //_=>todo!("Can't determine if {ty:?} is generic")
+        }
+    );
 }

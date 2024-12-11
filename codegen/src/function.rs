@@ -378,7 +378,7 @@ pub fn c_type_string<'tcx>(
             format!("RustTuple{generic_string}")
         }
         TyKind::Slice(_) => mangle(ty, tcx),
-        TyKind::Never => "Never".into(),
+        TyKind::Never => "void".into(),
         TyKind::Str | TyKind::Dynamic(_, _, _) => {
             let name = mangle(ty, tcx);
             format!("struct {name}")
