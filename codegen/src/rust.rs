@@ -94,7 +94,7 @@ pub fn rust_shim<'tcx>(
     let translator_body = format!("unsafe{{{escaped_real_name}({translated_args}).into()}}");
 
     souce_builder.add_rust(&format!(
-        "#[export_name = \"{shim_name}\"]pub extern \"C\" fn {escaped_shim_name}({real_args})->{real_ret}{{\n{translator_body}\n}}\n",
+        "#[export_name = \"{shim_name}\"]\n#[linkage = \"linkonce_odr\"]\npub extern \"C\" fn {escaped_shim_name}({real_args})->{real_ret}{{\n{translator_body}\n}}\n",
     ));
 }
 

@@ -238,9 +238,9 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.source_file.push(RUST_DYN);
         res.source_file.push(RUST_STR);
         res.source_file.push(RUST_FN_DEF);
-        res.source_file.push("struct isize{intptr_t i;};\n");
-        res.source_file.push("struct usize{uintptr_t i;};\n");
-        res.source_file.push("struct RustChar{uint32_t i;};\n");
+        res.source_file.push("#ifndef _RUST_ISIZE\nstruct isize{intptr_t i;};\n#define _RUST_ISIZE 1\n#endif\n");
+        res.source_file.push("#ifndef _RUST_USIZE\nstruct usize{uintptr_t i;};\n#define _RUST_USIZE 1\n#endif\n");
+        res.source_file.push("#ifndef _RUST_CHAR\nstruct RustChar{uint32_t i;};\n#define _RUST_CHAR 1\n#endif\n");
         res.source_file.push("struct RustFn;\n");
         res.source_file.push("#define RUST_IMMUTABLE false\n");
         res.source_file.push("#define RUST_MUTABLE true\n");
@@ -250,11 +250,10 @@ impl<'tcx> CSourceBuilder<'tcx> {
 
         res.source_file.push("#define restrict __restrict\n");
         res.assert_sizeof("void*", (res.size_of_usize / 8).into());
-        res.source_file
-            .push("struct ptr_pair{void* addr; void* meta;};\n");
 
-        res.rust_file.push("#![feature(slice_ptr_get)]\n");
-        res.rust_file.push("#![allow(non_camel_case_types,unreachable_code)]");
+        res.rust_file.push("#![feature(slice_ptr_get,linkage)]\n");
+        res.rust_file
+            .push("#![allow(non_camel_case_types,unreachable_code)]");
         res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]
 pub struct RustStr{ptr:*const char, len:usize}
 impl Into<*const str> for RustStr{
@@ -262,9 +261,13 @@ impl Into<*const str> for RustStr{
         unsafe{std::slice::from_raw_parts(self.ptr as *const u8,self.len) as *const [u8] as *const str}
     }
 }");
-        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct RustFatPtr{ptr:*const char, meta:usize}\n");
-        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct RawSlice;\n");
-        res.rust_file.push("#[derive(Clone,Copy)]#[repr(C)]pub struct Dynamic;\n");
+        res.rust_file.push(
+            "#[derive(Clone,Copy)]#[repr(C)]pub struct RustFatPtr{ptr:*const char, meta:usize}\n",
+        );
+        res.rust_file
+            .push("#[derive(Clone,Copy)]#[repr(C)]pub struct RawSlice;\n");
+        res.rust_file
+            .push("#[derive(Clone,Copy)]#[repr(C)]pub struct Dynamic;\n");
         res.rust_file.push(
             "#[derive(Clone,Copy)]#[repr(C)]
 pub struct RustSlice{ptr:*const char, len:usize}
@@ -344,12 +347,20 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 tcx,
                 generic_instance.def_id(),
             );
+            if !poly_gargs.is_empty()
+                && tcx.codegen_fn_attrs(finstance.def_id()).flags.contains(
+                    rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::TRACK_CALLER,
+                )
+            {
+                eprintln!("WARNING: {finstance:?} is generic, and has `track_caller`, so bindings to it can't be generated for now.");
+                return;
+            }
             if let None =
                 self.add_fn_template(Instance::new(generic_instance.def_id(), poly_gargs), tcx)
             {
                 return;
             }
-            if let Some(path) = symbol_to_path(&fn_name) {
+            if let Some(path) = symbol_to_path(&fn_name, SymbolCase::SnakeCase) {
                 //
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                 let namespace: String = beg
@@ -379,8 +390,8 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                     &format!("{end}{generic_string}"),
                 );
                 self.source_file
-                    .push(format!("extern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template} {decl}{{{body}}} }}\n",));
-                self.source_file.push(";\n");
+                    .push(format!("#ifdef _RUST_{fn_name}\nextern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template} {decl}{{{body}}} }}\n#define _RUST_{fn_name} 1\n#endif\n",));
+        
             } else {
                 let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
                 self.source_file
@@ -447,7 +458,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
         let fn_name = crate::instance_ident(genetric_fn, tcx)
             .to_string()
             .replace('.', "_");
-        let Some(path) = symbol_to_path(&fn_name) else {
+        let Some(path) = symbol_to_path(&fn_name, SymbolCase::SnakeCase) else {
             eprintln!(
                 "Skipping template declaration for {fn_name} cause it can't be turned into a path."
             );
@@ -557,12 +568,13 @@ fn add_ty<'tcx>(
     if sb.is_ty_defined(t) {
         return;
     }
-
+    eprintln!("{t} is not defined.");
     match t.kind() {
         TyKind::FnDef(_, _) => (),
         TyKind::Ref(_, inner, _) | TyKind::RawPtr(inner, _) => {
             if !crate::is_fat_ptr(t, tcx, instance) {
                 sb.delay_typedef(*inner);
+                sb.defined_tys.insert(t);
             }
         }
         TyKind::Array(elem, len) => {
@@ -636,7 +648,7 @@ fn add_ty<'tcx>(
                         &mangled_name,
                     );
                     sb.source_file.push(format!(
-                        "template <> struct {align}RustTuple{generic_string}{{\n{fields}}};\n"
+                        "#ifndef _RUST_{mangled_name}\ntemplate <> struct {align}RustTuple{generic_string}{{\n{fields}}};\n#define _RUST_{mangled_name} 1\n#endif\n"
                     ));
                 }
                 //FieldsShape::Union =>
@@ -750,7 +762,7 @@ fn add_ty<'tcx>(
             match &layout.variants {
                 Variants::Single { index: _ } => match &layout.fields {
                     FieldsShape::Primitive if is_zst(t, tcx) => {
-                        if let Some(path) = symbol_to_path(&name) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -763,7 +775,7 @@ fn add_ty<'tcx>(
                             ));
                         } else {
                             sb.source_file
-                                .push(format!("\n#ifndef _RUST_TY_DEF_{name} {template_preifx}struct {name}{generics}{{}};#define _RUST_TY_DEF_{name} 1\n#endif\n"));
+                                .push(format!("\n#ifndef _RUST_TY_DEF_{name} struct {name}{{}};#define _RUST_TY_DEF_{name} 1\n#endif\n"));
                             sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
                         }
@@ -794,7 +806,9 @@ fn add_ty<'tcx>(
                                 pad_count += 1;
                             }
                             let field_def = &variant_0.fields[*field_idx];
-                            add_ty(sb, tcx, field_def.ty(tcx, gargs), instance);
+                            let field_ty = field_def.ty(tcx, gargs);
+
+                            add_ty(sb, tcx, field_ty, instance);
                             if is_zst(
                                 crate::monomorphize(instance, field_def.ty(tcx, gargs), tcx),
                                 tcx,
@@ -833,7 +847,7 @@ fn add_ty<'tcx>(
                         } else {
                             String::new()
                         };
-                        if let Some(path) = symbol_to_path(&name) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -856,7 +870,7 @@ fn add_ty<'tcx>(
                             );
                         } else {
                             sb.source_file.push(format!(
-                                "#ifndef _RUST_TY_DEF_{name}\n{template_preifx}struct {align}{name}{generics}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
+                                "#ifndef _RUST_TY_DEF_{name}\nstruct {align}{name}{{\n{fields}}};\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
                             ));
                             sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
                             sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
@@ -904,7 +918,7 @@ fn add_ty<'tcx>(
                         } else {
                             String::new()
                         };
-                        if let Some(path) = symbol_to_path(&name) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -1056,7 +1070,7 @@ fn add_ty<'tcx>(
                         .map(|(_, (variant_name, _))| format!("\t{variant_name}:{variant_name},\n"))
                         .collect::<String>();
                     sb.add_rust_if_missing(&format!("#[derive(Clone,Copy)]#[repr(C)]\nunion {name}{{tag:RustTag<{tag_offset},{primitive}>,{rust_enum_fields}}}\n",primitive = primitive_to_rust_type(tag.primitive()),name = name.replace('$',"ds")), &name);
-                    if let Some(path) = symbol_to_path(&name) {
+                    if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
                         let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                         let namespace: String =
                             beg.iter().map(|s| s.as_str()).intersperse("::").collect();
@@ -1074,7 +1088,7 @@ fn add_ty<'tcx>(
         TyKind::Never => (),
         TyKind::Slice(elem) => {
             let name = mangle(t, tcx);
-            sb.source_file.push(format!("struct {name} {{}};\n"));
+            sb.source_file.push(format!("#ifndef _RUST_TY_DEF_{name}\nstruct {name} {{}};\n#define _RUST_TY_DEF_{name}\n#endif\n"));
             add_ty(sb, tcx, *elem, instance)
         }
         TyKind::Str => {
@@ -1152,7 +1166,7 @@ pub fn add_ty_template<'tcx>(
                 format!("template<{garg_body}> ")
             };
 
-            if let Some(path) = symbol_to_path(&name) {
+            if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                 let namespace: String = beg.iter().map(|s| s.as_str()).intersperse("::").collect();
                 sb.source_file.push(format!(
@@ -1232,7 +1246,28 @@ fn primitive_to_rust_type(primitive: rustc_target::abi::Primitive) -> &'static s
         Primitive::Pointer(_) => "*const ()",
     }
 }
-pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
+fn make_first_letter_uppercase(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+pub enum SymbolCase {
+    PascalCase,
+    SnakeCase,
+    ScreemingCase,
+}
+impl SymbolCase {
+    fn make_case(&self, s: &str) -> String {
+        match self {
+            Self::PascalCase => make_first_letter_uppercase(s),
+            Self::SnakeCase => s.to_lowercase(),
+            Self::ScreemingCase => s.to_uppercase(),
+        }
+    }
+}
+pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
     let demangled = format!("{:#}", rustc_demangle::demangle(symbol));
     if !demangled.contains(['.', '>', '{', '}']) {
         let last = demangled.split("::").count() - 1;
@@ -1242,7 +1277,7 @@ pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
                 .enumerate()
                 .map(|(idx, e)| {
                     let res = if idx == last {
-                        e.to_string()
+                        case.make_case(&e.to_string())
                     } else {
                         e.to_string().to_lowercase()
                     };
@@ -1254,6 +1289,8 @@ pub fn symbol_to_path(symbol: &str) -> Option<Vec<String>> {
                         "new" => "_new".to_string(),
                         "typeid" => "_typeid".to_string(),
                         "and" => "_and".to_string(),
+                        "unsigned" => "_unsigned".to_string(),
+                        "signed" => "_signed".to_string(),
                         _ => res,
                     }
                 })

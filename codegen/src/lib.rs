@@ -45,6 +45,7 @@ mod function;
 mod souce_builder;
 /// Handles turning a Rust static into a C one.
 mod statics;
+mod utilis;
 /// This module contains a list of generated test cases, created from the .rs files in `tests`.
 // Auto-generated, contains no docs.
 #[allow(missing_docs, clippy::missing_docs_in_private_items)]
@@ -142,6 +143,7 @@ impl CodegenBackend for CBackend {
         metadata: EncodedMetadata,
         _need_metadata_module: bool,
     ) -> Box<dyn Any> {
+       
         // What is this `defid_set`? The doc's don't seem to explain it too well...
         let (_defid_set, cgus) = tcx.collect_and_partition_mono_items(());
         let crate_info = CrateInfo::new(tcx, "??".to_string());
@@ -159,9 +161,9 @@ impl CodegenBackend for CBackend {
                 .iter()
                 .flat_map(rustc_middle::mir::mono::CodegenUnit::items)
             {
-                match item {
+                rustc_middle::ty::print::with_no_trimmed_paths!{match item {
                     MonoItem::Fn(finstance) => {
-                        function::compile_function(*finstance, *data, &mut source_bilder, tcx);
+                        function::compile_function(*finstance, *data, &mut source_bilder, tcx,);
                     }
                     MonoItem::Static(static_def) => {
                         statics::define_static(*static_def, *data, &mut source_bilder, tcx);
@@ -169,7 +171,7 @@ impl CodegenBackend for CBackend {
                     MonoItem::GlobalAsm(asm) => {
                         eprintln!("Global asm not supported ATM. asm:{asm:?}");
                     }
-                }
+                }}
             }
             (name, source_bilder.into_source_files())
         };
@@ -215,31 +217,42 @@ impl CodegenBackend for CBackend {
                 .output()
                 .expect("Could not run a syntax check using g++");
             assert!(out.status.success(), "{out:?}");
-
-            let rust_bridge_lib = outputs
-                .temp_path_ext("elf", Some(&name))
-                .with_file_name(&name)
-                .with_extension("elf");
-            let out = std::process::Command::new("rustc")
-                .arg(&rust_bridge_source)
-                .arg("-O")
-                .arg("--crate-type=staticlib")
-                .arg("-o")
-                .arg(&rust_bridge_lib)
-                .output()
-                .expect("Could not compile the Rust bridge code.");
-            eprintln!(
-                "rust_bridge_source:{rust_bridge_source:?} rust_bridge_lib:{rust_bridge_lib:?}"
-            );
-            assert!(out.status.success(), "{out:?}");
-            CompiledModule {
-                name,
-                kind: ModuleKind::Regular,
-                object: Some(rust_bridge_lib),
-                bytecode: Some(header_path),
-                dwarf_object: None,
-                llvm_ir: None,
-                assembly: None,
+            if std::env::var("SB_NO_COMPILE_SHIM").is_err() {
+                let rust_bridge_lib = outputs
+                    .temp_path_ext("elf", Some(&name))
+                    .with_file_name(&name)
+                    .with_extension("elf");
+                let out = std::process::Command::new("rustc")
+                    .arg(&rust_bridge_source)
+                    .arg("-O")
+                    .arg("--crate-type=staticlib")
+                    .arg("-o")
+                    .arg(&rust_bridge_lib)
+                    .output()
+                    .expect("Could not compile the Rust bridge code.");
+                eprintln!(
+                    "rust_bridge_source:{rust_bridge_source:?} rust_bridge_lib:{rust_bridge_lib:?}"
+                );
+                assert!(out.status.success(), "{out:?}");
+                CompiledModule {
+                    name,
+                    kind: ModuleKind::Regular,
+                    object: Some(rust_bridge_lib),
+                    bytecode: Some(header_path),
+                    dwarf_object: None,
+                    llvm_ir: None,
+                    assembly: None,
+                }
+            } else {
+                CompiledModule {
+                    name,
+                    kind: ModuleKind::Regular,
+                    object: None,
+                    bytecode: Some(header_path),
+                    dwarf_object: None,
+                    llvm_ir: None,
+                    assembly: Some(rust_bridge_source),
+                }
             }
         }];
         let codegen_results = CodegenResults {

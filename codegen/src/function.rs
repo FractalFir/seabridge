@@ -1,13 +1,16 @@
 use rustc_middle::mir::mono::MonoItemData;
 use rustc_middle::ty::FloatTy;
+use rustc_middle::ty::GenericArg;
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::IntTy;
+use rustc_middle::ty::List;
 use rustc_middle::ty::PseudoCanonicalInput;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::TyKind;
 use rustc_middle::ty::TypingEnv;
 use rustc_middle::ty::UintTy;
+use rustc_middle::mir::mono::MonoItem;
 
 use rustc_target::abi::call::ArgAttribute;
 use rustc_target::abi::Reg;
@@ -19,13 +22,19 @@ use rustc_target::callconv::PassMode;
 
 use rustc_hir::Mutability;
 
+use rustc_span::def_id::DefId;
+
 use crate::monomorphize;
 use crate::souce_builder::is_zst;
 use crate::souce_builder::CSourceBuilder;
+use crate::souce_builder::SymbolCase;
 
 use std::fmt::Write;
+
 fn is_public<'tcx>(finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
+   ;
     if !finstance.def_id().is_local() {
+        eprintln!("{finstance:?} is not local.");
         return true;
     }
     tcx.visibility(finstance.def_id()).is_public()
@@ -40,6 +49,10 @@ pub(crate) fn compile_function<'tcx>(
     if source_builder.is_defined(finstance) {
         return;
     }
+    /*if tcx.cross_crate_inlinable(finstance.def_id()) {
+        eprintln!("WARNING {finstance:?} is cross-crate inlineable, so no bindings can be generated for it safely");
+        return;
+    }*/
 
     // Skip non-public functions
     if !is_public(finstance, tcx) {
@@ -215,7 +228,12 @@ pub fn fn_decl<'tcx>(
 
     format!("{ret} {fn_name}({args})")
 }
-
+fn peel_indirect(mut ty: Ty) -> Ty {
+    while let TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) = ty.kind() {
+        ty = *inner;
+    }
+    ty
+}
 /// Turns a given type `ty` into a C type string, adding typedefs if need be.
 #[allow(clippy::format_collect, clippy::too_many_lines)]
 pub fn c_type_string<'tcx>(
@@ -262,10 +280,39 @@ pub fn c_type_string<'tcx>(
             } else if is_zst(*inner, tcx) {
                 format!("void {mutability_str}*")
             } else {
-                format!(
-                    "{} {mutability_str}*",
-                    c_type_string(*inner, tcx, source_builder, instance)
-                )
+                match inner.kind() {
+                    TyKind::Adt(def, gargs) => {
+                        if !source_builder.is_ty_defined(*inner) {
+                            let adt_instance = Instance::try_resolve(
+                                tcx,
+                                TypingEnv::fully_monomorphized(),
+                                def.did(),
+                                gargs,
+                            )
+                            .unwrap()
+                            .unwrap();
+                            let poly_gargs =
+                                List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
+                                    tcx,
+                                    adt_instance.def_id(),
+                                );
+                            crate::souce_builder::add_ty_template(
+                                source_builder,
+                                tcx,
+                                Instance::new(adt_instance.def_id(), poly_gargs)
+                                    .ty(tcx, TypingEnv::fully_monomorphized()),
+                            );
+                        }
+                        format!(
+                            "{} {mutability_str}*",
+                            adt_ident(tcx, gargs, def.did(), source_builder, instance)
+                        )
+                    }
+                    _ => format!(
+                        "{} {mutability_str}*",
+                        c_type_string(*inner, tcx, source_builder, instance)
+                    ),
+                }
             }
         } /*
         TyKind::Ref(_, inner, mutability) => {
@@ -347,26 +394,7 @@ pub fn c_type_string<'tcx>(
                 }
             }
         },
-        TyKind::Adt(def, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
-            // Get the mangled path: it is absolute, and not poluted by types being rexported
-            let ident = crate::instance_ident(adt_instance, tcx);
-            let generic_string =
-                crate::souce_builder::generic_string(gargs, tcx, source_builder, instance);
-            if let Some(path) = crate::souce_builder::symbol_to_path(&ident) {
-                format!(
-                    "{}{generic_string}",
-                    path.iter()
-                        .map(|s| format!("::{}", s.as_str()))
-                        .collect::<String>()
-                )
-            } else {
-                format!("{ident}{generic_string}",)
-            }
-        }
+        TyKind::Adt(def, gargs) => adt_ident(tcx, &gargs, def.did(), source_builder, instance),
         TyKind::FnPtr(_, _) => "RustFn*".into(),
         TyKind::Closure(did, gargs) => {
             let adt_instance =
@@ -405,6 +433,31 @@ pub fn c_type_string<'tcx>(
             format!("RustFnDef<0x{:x}>", hasher.finish() as u64)
         }
         _ => todo!("Can't turn {ty:?} into a c type", ty = ty.kind()),
+    }
+}
+fn adt_ident<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    gargs: &'tcx List<GenericArg<'tcx>>,
+    def: DefId,
+    source_builder: &mut CSourceBuilder<'tcx>,
+    finstance: Instance<'tcx>,
+) -> String {
+    let adt_instance = Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def, gargs)
+        .unwrap()
+        .unwrap();
+    // Get the mangled path: it is absolute, and not poluted by types being rexported
+    let ident = crate::instance_ident(adt_instance, tcx);
+    let generic_string =
+        crate::souce_builder::generic_string(gargs, tcx, source_builder, finstance);
+    if let Some(path) = crate::souce_builder::symbol_to_path(&ident, SymbolCase::PascalCase) {
+        format!(
+            "{}{generic_string}",
+            path.iter()
+                .map(|s| format!("::{}", s.as_str()))
+                .collect::<String>()
+        )
+    } else {
+        format!("{ident}",)
     }
 }
 /// Returns a mangled name of this type.
