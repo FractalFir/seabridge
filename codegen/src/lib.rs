@@ -45,11 +45,11 @@ mod function;
 mod souce_builder;
 /// Handles turning a Rust static into a C one.
 mod statics;
-mod utilis;
 /// This module contains a list of generated test cases, created from the .rs files in `tests`.
 // Auto-generated, contains no docs.
 #[allow(missing_docs, clippy::missing_docs_in_private_items)]
 mod test;
+mod utilis;
 
 mod rust;
 
@@ -143,7 +143,6 @@ impl CodegenBackend for CBackend {
         metadata: EncodedMetadata,
         _need_metadata_module: bool,
     ) -> Box<dyn Any> {
-       
         // What is this `defid_set`? The doc's don't seem to explain it too well...
         let (_defid_set, cgus) = tcx.collect_and_partition_mono_items(());
         let crate_info = CrateInfo::new(tcx, "??".to_string());
@@ -161,7 +160,7 @@ impl CodegenBackend for CBackend {
                 .iter()
                 .flat_map(rustc_middle::mir::mono::CodegenUnit::items)
             {
-                rustc_middle::ty::print::with_no_trimmed_paths!{match item {
+                rustc_middle::ty::print::with_no_trimmed_paths! {match item {
                     MonoItem::Fn(finstance) => {
                         function::compile_function(*finstance, *data, &mut source_bilder, tcx,);
                     }
@@ -266,17 +265,10 @@ impl CodegenBackend for CBackend {
         (codegen_results, FxIndexMap::default())
     }
     /// Collects all the files emmited by the codegen for a specific crate, and turns them into a .rlib file containing all the C source files and metadata.
-    fn link(
-        &self,
-        sess: &Session,
-        codegen_results: CodegenResults,
-        outputs: &OutputFilenames,
-    ) -> Result<(), ErrorGuaranteed> {
+    fn link(&self, sess: &Session, codegen_results: CodegenResults, outputs: &OutputFilenames) {
         use rustc_codegen_ssa::back::link::link_binary;
-        link_binary(sess, &RlibArchiveBuilder, codegen_results, outputs)
-            .expect("Could not link the binary into a .rlib file!");
+        link_binary(sess, &RlibArchiveBuilder, codegen_results, outputs);
         //todo!();
-        Ok(())
     }
 }
 /// Turns a possibly generic type `T` into a concreate one, removing lifetimes.

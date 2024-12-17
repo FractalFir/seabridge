@@ -238,9 +238,15 @@ impl<'tcx> CSourceBuilder<'tcx> {
         res.source_file.push(RUST_DYN);
         res.source_file.push(RUST_STR);
         res.source_file.push(RUST_FN_DEF);
-        res.source_file.push("#ifndef _RUST_ISIZE\nstruct isize{intptr_t i;};\n#define _RUST_ISIZE 1\n#endif\n");
-        res.source_file.push("#ifndef _RUST_USIZE\nstruct usize{uintptr_t i;};\n#define _RUST_USIZE 1\n#endif\n");
-        res.source_file.push("#ifndef _RUST_CHAR\nstruct RustChar{uint32_t i;};\n#define _RUST_CHAR 1\n#endif\n");
+        res.source_file.push(
+            "#ifndef _RUST_ISIZE\nstruct isize{intptr_t i;};\n#define _RUST_ISIZE 1\n#endif\n",
+        );
+        res.source_file.push(
+            "#ifndef _RUST_USIZE\nstruct usize{uintptr_t i;};\n#define _RUST_USIZE 1\n#endif\n",
+        );
+        res.source_file.push(
+            "#ifndef _RUST_CHAR\nstruct RustChar{uint32_t i;};\n#define _RUST_CHAR 1\n#endif\n",
+        );
         res.source_file.push("struct RustFn;\n");
         res.source_file.push("#define RUST_IMMUTABLE false\n");
         res.source_file.push("#define RUST_MUTABLE true\n");
@@ -390,8 +396,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                     &format!("{end}{generic_string}"),
                 );
                 self.source_file
-                    .push(format!("#ifdef _RUST_{fn_name}\nextern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template} {decl}{{{body}}} }}\n#define _RUST_{fn_name} 1\n#endif\n",));
-        
+                    .push(format!("#ifndef _RUST_{fn_name}\nextern \"C\" {shim_decl};\nnamespace {namespace}{{ \n /*fndecl*/ {template} {decl}{{{body}}} }}\n#define _RUST_{fn_name} 1\n#endif\n",));
             } else {
                 let decl = crate::function::fn_decl(finstance, tcx, self, &fn_name);
                 self.source_file
@@ -822,7 +827,7 @@ fn add_ty<'tcx>(
                                 .next()
                                 .is_some_and(char::is_alphabetic)
                             {
-                                field_def.name.to_string()
+                                escape_forbidden_symbol(&field_def.name.to_string())
                             } else {
                                 format!("f{}", field_def.name)
                             };
@@ -902,14 +907,14 @@ fn add_ty<'tcx>(
                             {
                                 format!("f{}", field_def.name)
                             } else {
-                                field_def.name.to_string()
+                                escape_forbidden_symbol(&field_def.name.to_string())
                             };
                             fields.push_str(&format!(
                                 "{} {field_name};\n",
                                 c_type_string(field_def.ty(tcx, gargs), tcx, sb, instance)
                             ));
                             rust_fields.push_str(&format!(
-                                "{field_name}:{}",
+                                "{field_name}:{},",
                                 rust_type_string(field_def.ty(tcx, gargs), tcx, sb, instance, true)
                             ));
                         }
@@ -1003,7 +1008,7 @@ fn add_ty<'tcx>(
                                         {
                                             format!("f{}", field_def.name)
                                         } else {
-                                            field_def.name.to_string()
+                                            escape_forbidden_symbol(&field_def.name.to_string())
                                         };
                                         fields.push_str(&format!(
                                             "{} {field_name};\n",
@@ -1267,6 +1272,20 @@ impl SymbolCase {
         }
     }
 }
+pub fn escape_forbidden_symbol(symbol: &str) -> String {
+    match symbol {
+        "float" => "_float".to_string(),
+        "int" => "_int".to_string(),
+        "char" => "_char".to_string(),
+        "private" => "_private".to_string(),
+        "new" => "_new".to_string(),
+        "typeid" => "_typeid".to_string(),
+        "and" => "_and".to_string(),
+        "unsigned" => "_unsigned".to_string(),
+        "signed" => "_signed".to_string(),
+        _ => symbol.to_string(),
+    }
+}
 pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
     let demangled = format!("{:#}", rustc_demangle::demangle(symbol));
     if !demangled.contains(['.', '>', '{', '}']) {
@@ -1281,18 +1300,7 @@ pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
                     } else {
                         e.to_string().to_lowercase()
                     };
-                    match res.as_str() {
-                        "float" => "_float".to_string(),
-                        "int" => "_int".to_string(),
-                        "char" => "_char".to_string(),
-                        "private" => "_private".to_string(),
-                        "new" => "_new".to_string(),
-                        "typeid" => "_typeid".to_string(),
-                        "and" => "_and".to_string(),
-                        "unsigned" => "_unsigned".to_string(),
-                        "signed" => "_signed".to_string(),
-                        _ => res,
-                    }
+                    escape_forbidden_symbol(res.as_str())
                 })
                 .collect(),
         )

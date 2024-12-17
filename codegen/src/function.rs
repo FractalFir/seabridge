@@ -1,3 +1,4 @@
+use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::mono::MonoItemData;
 use rustc_middle::ty::FloatTy;
 use rustc_middle::ty::GenericArg;
@@ -10,7 +11,6 @@ use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::TyKind;
 use rustc_middle::ty::TypingEnv;
 use rustc_middle::ty::UintTy;
-use rustc_middle::mir::mono::MonoItem;
 
 use rustc_target::abi::call::ArgAttribute;
 use rustc_target::abi::Reg;
@@ -32,7 +32,6 @@ use crate::souce_builder::SymbolCase;
 use std::fmt::Write;
 
 fn is_public<'tcx>(finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
-   ;
     if !finstance.def_id().is_local() {
         eprintln!("{finstance:?} is not local.");
         return true;
@@ -49,10 +48,10 @@ pub(crate) fn compile_function<'tcx>(
     if source_builder.is_defined(finstance) {
         return;
     }
-    /*if tcx.cross_crate_inlinable(finstance.def_id()) {
+    if tcx.cross_crate_inlinable(finstance.def_id()) {
         eprintln!("WARNING {finstance:?} is cross-crate inlineable, so no bindings can be generated for it safely");
         return;
-    }*/
+    }
 
     // Skip non-public functions
     if !is_public(finstance, tcx) {
