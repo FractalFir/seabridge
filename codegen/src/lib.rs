@@ -41,6 +41,8 @@ extern crate rustc_ty_utils;
 extern crate stable_mir;
 /// Handles turning a Rust function into a C one, and is resposible for converting the ABI.
 mod function;
+/// Used for generating Rust code.
+mod rust;
 /// Builds the C source, and also contains the config.
 mod souce_builder;
 /// Handles turning a Rust static into a C one.
@@ -49,9 +51,8 @@ mod statics;
 // Auto-generated, contains no docs.
 #[allow(missing_docs, clippy::missing_docs_in_private_items)]
 mod test;
+/// Misc utilities
 mod utilis;
-
-mod rust;
 
 use rustc_codegen_ssa::back::archive::ArArchiveBuilder;
 use rustc_codegen_ssa::back::archive::ArchiveBuilder;
@@ -65,13 +66,10 @@ use rustc_codegen_ssa::ModuleKind;
 use rustc_session::config::OutputFilenames;
 use rustc_session::Session;
 
-use rustc_errors::ErrorGuaranteed;
-
 use rustc_data_structures::fx::FxIndexMap;
 
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::dep_graph::WorkProductId;
-use rustc_middle::mir::mono::CodegenUnit;
 use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::ty::EarlyBinder;
 use rustc_middle::ty::Instance;
@@ -90,11 +88,6 @@ use souce_builder::StringBuilder;
 use std::path::Path;
 
 use std::any::Any;
-
-/// Assigns a unqiue name to this cgu. This name aims to be descriptive(if possible), and is a valid file name.
-fn cgu_name(cgu: &CodegenUnit) -> String {
-    cgu.name().to_string().replace('.', "_")
-}
 /// Retrives the name of a static.
 fn static_ident(stotic: DefId, tcx: TyCtxt<'_>) -> String {
     instance_ident(Instance::mono(tcx, stotic), tcx)
@@ -162,6 +155,7 @@ impl CodegenBackend for CBackend {
             {
                 rustc_middle::ty::print::with_no_trimmed_paths! {match item {
                     MonoItem::Fn(finstance) => {
+                        eprintln!("Defining function:{finstance:?}");
                         function::compile_function(*finstance, *data, &mut source_bilder, tcx,);
                     }
                     MonoItem::Static(static_def) => {

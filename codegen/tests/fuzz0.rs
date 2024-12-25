@@ -4,7 +4,17 @@
     unused_parens,
     unused_assignments,
     overflowing_literals,
-    internal_features
+    internal_features,
+    dead_code,
+    clippy::eq_op,
+    clippy::unnecessary_cast,
+    clippy::too_many_arguments,
+    clippy::useless_transmute,
+    clippy::unit_arg,
+    clippy::type_complexity,
+    clippy::just_underscores_and_digits,
+    clippy::large_enum_variant,
+    clippy::nonminimal_bool,
 )]
 extern crate core;
 use core::intrinsics::mir::*;
@@ -3217,8 +3227,8 @@ pub fn test_main() {
     fn0(
         std::hint::black_box(true),
         std::hint::black_box(15983_u16),
-        std::hint::black_box((-102_isize)),
-        std::hint::black_box((-46_i8)),
+        std::hint::black_box(-102_isize),
+        std::hint::black_box(-46_i8),
         std::hint::black_box(691098930746575142_i64),
     );
 }
@@ -3366,7 +3376,7 @@ pub enum Adt42 {
 }
 impl PrintFDebug for Adt43 {
     unsafe fn printf_debug(&self) {
-        unsafe { printf("Adt43{ ".as_ptr() as *const c_char) };
+        unsafe { printf(c"Adt43{".as_ptr() as *const c_char) };
         unsafe { printf(c"}".as_ptr()) };
     }
 }
@@ -3611,7 +3621,7 @@ pub enum Adt46 {
 }
 impl PrintFDebug for Adt47 {
     unsafe fn printf_debug(&self) {
-        unsafe { printf("Adt47{ ".as_ptr() as *const c_char) };
+        unsafe { printf(c"Adt47{".as_ptr() as *const c_char) };
         unsafe { printf(c"}".as_ptr()) };
     }
 }
@@ -3627,7 +3637,7 @@ pub struct Adt47 {
 }
 impl PrintFDebug for Adt48 {
     unsafe fn printf_debug(&self) {
-        unsafe { printf("Adt48{ ".as_ptr() as *const c_char) };
+        unsafe { printf(c"Adt48{".as_ptr() as *const c_char) };
         unsafe { printf(c"}".as_ptr()) };
     }
 }
@@ -3639,7 +3649,7 @@ pub struct Adt48 {
 }
 impl PrintFDebug for Adt49 {
     unsafe fn printf_debug(&self) {
-        unsafe { printf("Adt49{ ".as_ptr() as *const c_char) };
+        unsafe { printf(c"Adt49{".as_ptr() as *const c_char) };
         unsafe { printf(c"}".as_ptr()) };
     }
 }

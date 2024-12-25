@@ -1,4 +1,3 @@
-use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::mono::MonoItemData;
 use rustc_middle::ty::FloatTy;
 use rustc_middle::ty::GenericArg;
@@ -13,11 +12,7 @@ use rustc_middle::ty::TypingEnv;
 use rustc_middle::ty::UintTy;
 
 use rustc_target::abi::call::ArgAttribute;
-use rustc_target::abi::Reg;
-use rustc_target::abi::RegKind;
-use rustc_target::abi::Size;
-use rustc_target::abi::Variants;
-use rustc_target::callconv::CastTarget;
+
 use rustc_target::callconv::PassMode;
 
 use rustc_hir::Mutability;
@@ -30,7 +25,7 @@ use crate::souce_builder::CSourceBuilder;
 use crate::souce_builder::SymbolCase;
 
 use std::fmt::Write;
-
+/// Checks if a given function is public or not.
 fn is_public<'tcx>(finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     if !finstance.def_id().is_local() {
         eprintln!("{finstance:?} is not local.");
@@ -63,55 +58,12 @@ pub(crate) fn compile_function<'tcx>(
 pub fn arg_names<'tcx>(_instance: Instance<'tcx>, _tcx: TyCtxt<'tcx>, args: usize) -> Vec<String> {
     (0..args).map(|arg| format!("a{arg}")).collect()
 }
-/// Turns the `CastTarget` into a list of variables, that correspond that all of the registers. If `arg_name` is Some, this is sutiable to be inserted into a function argument list.
-/// If not, this is suitable to be the body of a struct(used in returns)
-fn pass_mode_cast_elems(pad_i32: bool, cast: &CastTarget, arg_name: Option<&str>) -> String {
-    // If the name is_some, preformat it. If no, just return an empty string.
-    let name = arg_name.map_or(String::new(), |name| format!("_{name}"));
-    // This Vec contains all the fields / args `CastTarget` is turned into.
-    let mut elems = vec![];
-    // If a padding register is requesred, add it.
-    if pad_i32 {
-        elems.push(format!("int32_t dummy{name},"));
-    };
-    // Handle the prefix (a set of identical registers)
-    elems.extend(
-        cast.prefix
-            .iter()
-            .flatten()
-            .enumerate()
-            .map(|(id, reg)| format!("{} prefix_{id}{name}", reg_to_type(*reg))),
-    );
-    // TODO: don't ignore `is_consecuitve`, and figure out what it is supposed to be.
-    // Divide the total size passed in `rest` by the size of an individual register, to get the ammount of registers.
-    // Round down, since the last register can have a smaller size.
-    let rest_count = cast
-        .rest
-        .total
-        .bytes()
-        .div_floor(cast.rest.unit.size.bytes());
-    // Emmit the main, identicaly-sized registers.
-    elems.extend(
-        (0..rest_count)
-            .map(|id| format!("{} rest_{id}{name}", reg_to_type(cast.rest.unit)))
-            .intersperse(",".into()),
-    );
-    // If the total size is not a mutiple of the register size, the last register may be smaller.
-    let reminder = cast.rest.total.bytes() % cast.rest.unit.size.bytes();
-    if reminder != 0 {
-        elems.push(format!(
-            "{} rest_{rest_count}{name}",
-            reg_to_type_inner(cast.rest.unit.kind, Size::from_bytes(reminder))
-        ));
-    }
-    // Collect all the elements, and separate them correctly.
-    elems.into_iter().intersperse(",".to_string()).collect()
-}
+/// Calls the C-to-rust shim.
 pub fn call_shim<'tcx>(
     instance: Instance<'tcx>,
     tcx: TyCtxt<'tcx>,
     shim_name: &str,
-    source_builder: &mut CSourceBuilder,
+    _source_builder: &mut CSourceBuilder,
 ) -> String {
     let uncodumented = rustc_middle::ty::List::empty();
 
@@ -165,7 +117,7 @@ pub fn fn_decl<'tcx>(
         .expect("Could not compute fn abi");
     // Handle the ABI of all the argument types
     let args = arg_names(instance, tcx, abi.args.len());
-    let mut args: String = (&abi.args)
+    let args: String = (&abi.args)
         .into_iter()
         .zip(args.iter())
         .filter_map(|(arg, name)| {
@@ -217,22 +169,12 @@ pub fn fn_decl<'tcx>(
                 c_type_string(abi.ret.layout.ty, tcx, source_builder, instance)
             )
         }
-        _ => {
-            (format!(
-                "{}",
-                c_type_string(abi.ret.layout.ty, tcx, source_builder, instance),
-            ))
-        }
+        _ => c_type_string(abi.ret.layout.ty, tcx, source_builder, instance).to_string(),
     };
 
     format!("{ret} {fn_name}({args})")
 }
-fn peel_indirect(mut ty: Ty) -> Ty {
-    while let TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) = ty.kind() {
-        ty = *inner;
-    }
-    ty
-}
+
 /// Turns a given type `ty` into a C type string, adding typedefs if need be.
 #[allow(clippy::format_collect, clippy::too_many_lines)]
 pub fn c_type_string<'tcx>(
@@ -245,7 +187,10 @@ pub fn c_type_string<'tcx>(
     if !source_builder.delayed_typedefs().contains(&ty) {
         source_builder.add_typedefs(ty, tcx, instance);
     }
-
+    eprintln!(
+        "c_type_string source_builder:{:?}",
+        source_builder.delayed_typedefs()
+    );
     let ty = monomorphize(instance, ty, tcx);
     match ty.kind() {
         TyKind::Array(elem, length) => format!(
@@ -270,7 +215,7 @@ pub fn c_type_string<'tcx>(
                         let tpe = c_type_string(*elem, tcx, source_builder, instance);
                         format!("RustSlice<{tpe}>")
                     }
-                    TyKind::Dynamic(_, _, _) => format!("RustDyn"),
+                    TyKind::Dynamic(_, _, _) => "RustDyn".to_string(),
                     _ => format!(
                         "RustFatPtr<{inner}>",
                         inner = c_type_string(*inner, tcx, source_builder, instance)
@@ -393,7 +338,7 @@ pub fn c_type_string<'tcx>(
                 }
             }
         },
-        TyKind::Adt(def, gargs) => adt_ident(tcx, &gargs, def.did(), source_builder, instance),
+        TyKind::Adt(def, gargs) => adt_ident(tcx, gargs, def.did(), source_builder, instance),
         TyKind::FnPtr(_, _) => "RustFn*".into(),
         TyKind::Closure(did, gargs) => {
             let adt_instance =
@@ -424,16 +369,18 @@ pub fn c_type_string<'tcx>(
         TyKind::FnDef(_, _) => {
             use std::hash::Hash;
             use std::hash::Hasher;
+            #[allow(deprecated)]
             use std::hash::SipHasher;
-
+            #[allow(deprecated)]
             let mut hasher = SipHasher::new_with_keys(0xDEAD_C0FFE, 0xBEEF_BABE);
             ty.hash(&mut hasher);
 
-            format!("RustFnDef<0x{:x}>", hasher.finish() as u64)
+            format!("RustFnDef<0x{:x}>", { hasher.finish() })
         }
         _ => todo!("Can't turn {ty:?} into a c type", ty = ty.kind()),
     }
 }
+/// Gets the string used to refer to a C++ typedef of an ADT.
 fn adt_ident<'tcx>(
     tcx: TyCtxt<'tcx>,
     gargs: &'tcx List<GenericArg<'tcx>>,
@@ -448,7 +395,7 @@ fn adt_ident<'tcx>(
     let ident = crate::instance_ident(adt_instance, tcx);
     let generic_string =
         crate::souce_builder::generic_string(gargs, tcx, source_builder, finstance);
-    if let Some(path) = crate::souce_builder::symbol_to_path(&ident, SymbolCase::PascalCase) {
+    if let Some(path) = crate::souce_builder::symbol_to_path(&ident, SymbolCase::Pascal) {
         format!(
             "{}{generic_string}",
             path.iter()
@@ -456,7 +403,7 @@ fn adt_ident<'tcx>(
                 .collect::<String>()
         )
     } else {
-        format!("{ident}",)
+        ident.to_string()
     }
 }
 /// Returns a mangled name of this type.
@@ -553,24 +500,8 @@ pub fn mangle<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> String {
                     .unwrap()
                     .unwrap();
             // Get the mangled path: it is absolute, and not poluted by types being rexported
-            format!("{}", crate::instance_ident(adt_instance, tcx))
+            crate::instance_ident(adt_instance, tcx).to_string()
         }
         _ => todo!("Can't mangle {ty:?}"),
-    }
-}
-/// Turns a Rust register `reg` into a C type. If size is not a power of two, rounds up to `next_power_of_two`
-pub fn reg_to_type(reg: Reg) -> String {
-    reg_to_type_inner(reg.kind, reg.size)
-}
-/// Turns a Rust register into a C type. If size is not a power of two, rounds up to `next_power_of_two`
-pub fn reg_to_type_inner(reg: RegKind, size: Size) -> String {
-    match reg {
-        RegKind::Integer => format!("int{size}_t", size = size.bits().next_power_of_two()),
-        RegKind::Float => match size.bytes() {
-            4 => "float".into(),
-            8 => "double".into(),
-            _ => todo!("Unknown float of size {} bytes", size.bytes()),
-        },
-        RegKind::Vector => todo!("Can't handle register of type {reg:?}"),
     }
 }

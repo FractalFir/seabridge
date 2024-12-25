@@ -102,10 +102,5 @@ pub fn compile_file(path: &Path, is_lib: bool, is_release: bool) -> PathBuf {
     }
     out_path
 }
-
-pub fn run_test(path: &Path) {
-    let out = std::process::Command::new(path).output().unwrap();
-    assert!(out.status.success(), "{out:?}");
-}
 const NATIVE_LIB_EXTENSION: &str = "a";
 const NATIVE_EXEC_EXTENSION: &str = "elf";

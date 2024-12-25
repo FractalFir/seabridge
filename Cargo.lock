@@ -7,6 +7,10 @@ name = "cargo-cppbridge"
 version = "0.1.0"
 
 [[package]]
+name = "packer"
+version = "0.1.0"
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"

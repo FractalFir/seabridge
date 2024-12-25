@@ -2,3 +2,8 @@
 *.hpp
 *.a
 *.elf
+*.rs_bridge
+*.hpp
+*.hpp.gch
+*.txt
+*.out

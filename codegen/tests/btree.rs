@@ -1,10 +1,5 @@
 #![feature(allocator_api)]
-use std::alloc::Allocator;
-use std::alloc::Global;
-use std::ffi::OsString;
-use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
-use std::mem::MaybeUninit;
+#![allow(dead_code,non_camel_case_types)]
 use std::ptr::NonNull;
 #[repr(C)]
 pub struct aiocb {

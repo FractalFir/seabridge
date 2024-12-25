@@ -1,3 +1,4 @@
+#![allow(clippy::boxed_local)]
 #[inline(never)]
 pub fn add(lhs: i128, rhs: i128) -> i128 {
     lhs + rhs
@@ -14,7 +15,7 @@ pub fn recive_vec3(val: Vec3) -> Vec3 {
 }
 #[inline(never)]
 #[no_mangle]
-pub fn recive_box(val: Box<i32>) {}
+pub fn recive_box(_val: Box<i32>) {}
 #[inline(never)]
 pub fn recive_vec3_ref(val: &Vec3) {
     recive_vec3(*val);

@@ -24,57 +24,10 @@ use rustc_abi::Size;
 use crate::function::c_type_string;
 use crate::function::mangle;
 use crate::rust::rust_shim;
-/// Builtin, layout-compatible C++ repr of a Rust array
-const RUST_ARR: &str = "#ifndef RUST_ARR_DEFINED
-template<typename T, uintptr_t SIZE> class RustArr{
-    T arr[SIZE];
-    T& operator[](uintptr_t index){
-        if(index > SIZE) throw std::out_of_range(\"Index out of range in Rust array\");
-        return arr[index];
-    }
-};
-#define RUST_ARR_DEFINED 1
-#endif\n";
-/// Builtin, layout-compatible C++ repr of a Rust *[T].
-const RUST_SLICE: &str = "#ifndef RUST_SLICE
-template<typename T> class RustSlice{
-    T* ptr;
-    uintptr_t len;
-    T& operator[](uintptr_t idx){
-        if (idx > len)throw std::out_of_range(\"Index out of range in Rust slice\");
-        return (ptr+idx);
-    }
-};
-#define RUST_SLICE 1
-#endif\n";
-/// Builtin, layout-compatible C++ repr Rust *dyn Trait
-const RUST_DYN: &str = "#ifndef RUST_DYN
-class RustDyn{
-    void* ptr;
-    void* vtable;
-};
-#define RUST_DYN 1
-#endif\n";
-/// Builtin, layout-compatible C++ repr of Rust *str
-const RUST_STR: &str = "#ifndef RUST_STR
-template<bool> struct RustStr{
-    char32_t* utrf8_data;
-    uintptr_t len;
-};
-#define RUST_STR 1
-#endif
-#ifndef RUST_FAT_PTR
-template<typename T> struct RustFatPtr{
-    T* data;
-    void* metadata;
-};
-#define RUST_FAT_PTR 1
-#endif\n";
-const RUST_FN_DEF: &str = "
-#ifndef RUST_FN_DEF
-template<uint64_t id> struct RustFnDef{};
-#define RUST_FN_DEF 1
-#endif\n";
+mod predefined;
+mod typedef;
+use predefined::{C_TYPEDEFS, MANDATORY_HEADERS};
+
 /// An append-only UTF-8 string.
 // In the future, its append-only nature can be used for optimzations.
 // For example, it could be implemented using memory pages, with flags encouraging the kernel to swap it out of ram.
@@ -145,11 +98,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
     pub fn set_declared(&mut self, instance: Instance<'tcx>) {
         self.decalred.insert(instance);
     }
-    /// Checks if a given instance is defined(it's implementation is provided)
-    pub fn set_defined(&mut self, instance: Instance<'tcx>) {
-        self.set_declared(instance);
-        assert!(self.defined.insert(instance));
-    }
+ 
     /// Checks if this instance is `defined`
     pub fn is_defined(&self, instance: Instance<'tcx>) -> bool {
         self.defined.contains(&instance)
@@ -230,31 +179,8 @@ impl<'tcx> CSourceBuilder<'tcx> {
             delayed_typedefs: std::collections::vec_deque::VecDeque::with_capacity(0x100),
             rust_uids: HashSet::default(),
         };
-        res.include("stdint.h");
-        res.include("stdexcept");
-        res.include("span");
-        res.source_file.push(RUST_ARR);
-        res.source_file.push(RUST_SLICE);
-        res.source_file.push(RUST_DYN);
-        res.source_file.push(RUST_STR);
-        res.source_file.push(RUST_FN_DEF);
-        res.source_file.push(
-            "#ifndef _RUST_ISIZE\nstruct isize{intptr_t i;};\n#define _RUST_ISIZE 1\n#endif\n",
-        );
-        res.source_file.push(
-            "#ifndef _RUST_USIZE\nstruct usize{uintptr_t i;};\n#define _RUST_USIZE 1\n#endif\n",
-        );
-        res.source_file.push(
-            "#ifndef _RUST_CHAR\nstruct RustChar{uint32_t i;};\n#define _RUST_CHAR 1\n#endif\n",
-        );
-        res.source_file.push("struct RustFn;\n");
-        res.source_file.push("#define RUST_IMMUTABLE false\n");
-        res.source_file.push("#define RUST_MUTABLE true\n");
-        res.source_file
-            .push("template<typename... Types> struct RustTuple;\n");
-        res.source_file.push("#undef unix\n");
-
-        res.source_file.push("#define restrict __restrict\n");
+        MANDATORY_HEADERS.iter().for_each(|h| res.include(h));
+        C_TYPEDEFS.iter().for_each(|h| res.source_file.push(h));
         res.assert_sizeof("void*", (res.size_of_usize / 8).into());
 
         res.rust_file.push("#![feature(slice_ptr_get,linkage)]\n");
@@ -312,12 +238,14 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
     pub(crate) fn supports_restrict(&self) -> bool {
         true
     }
+    /// Generates templates for a given function.
     pub fn add_ty_templates(&mut self, t: Ty<'tcx>, tcx: TyCtxt<'tcx>) {
         use crate::rustc_middle::ty::TypeVisitable;
-        t.visit_with(&mut TemplateGenerator { tcx: tcx, sb: self });
+        t.visit_with(&mut TemplateGenerator { tcx, sb: self });
     }
     /// Adds all the typedefs this type needs.
     pub fn add_typedefs(&mut self, t: Ty<'tcx>, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
+        self.delayed_typedefs.push_front(t);
         self.delayed_typedefs.push_front(t);
         while let Some(t) = self.delayed_typedefs.pop_back() {
             add_ty(self, tcx, t, instance);
@@ -330,7 +258,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 .to_string()
                 .replace('.', "_");
 
-            let shim_symbol = create_shim(&fn_name);
+            let shim_symbol = c_shim_name(&fn_name);
             let shim_decl = crate::function::fn_decl(finstance, tcx, self, &shim_symbol);
             let body = format!(
                 "{call_shim}\n",
@@ -361,12 +289,13 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 eprintln!("WARNING: {finstance:?} is generic, and has `track_caller`, so bindings to it can't be generated for now.");
                 return;
             }
-            if let None =
-                self.add_fn_template(Instance::new(generic_instance.def_id(), poly_gargs), tcx)
+            if self
+                .add_fn_template(Instance::new(generic_instance.def_id(), poly_gargs), tcx)
+                .is_none()
             {
                 return;
             }
-            if let Some(path) = symbol_to_path(&fn_name, SymbolCase::SnakeCase) {
+            if let Some(path) = symbol_to_path(&fn_name, SymbolCase::Snake) {
                 //
                 let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                 let namespace: String = beg
@@ -386,7 +315,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 let template = if generic_string.is_empty() {
                     String::new()
                 } else {
-                    format!("template<>")
+                    "template<>".to_string()
                 };
 
                 let decl = crate::function::fn_decl(
@@ -411,11 +340,6 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
     /// Adds a function definition(the implementation of a function).
     pub fn add_fn_def(&mut self, finstance: Instance<'tcx>, tcx: TyCtxt<'tcx>) {
         self.add_fn_decl(finstance, tcx);
-    }
-    /// Checks if the generated source file ought to be only a header, and not contain any implementation.
-    #[allow(clippy::unused_self)]
-    pub fn header_mode(&self) -> bool {
-        true
     }
     #[allow(clippy::unused_self)]
     /// Checks if the target compiler supports 128 bit ints, or if it requires emulation.
@@ -452,6 +376,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
     pub fn supports_section(&self) -> bool {
         true
     }
+    /// Delays a type definition
     pub fn delay_typedef(&mut self, ty: Ty<'tcx>) {
         self.delayed_typedefs.push_front(ty);
     }
@@ -463,7 +388,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
         let fn_name = crate::instance_ident(genetric_fn, tcx)
             .to_string()
             .replace('.', "_");
-        let Some(path) = symbol_to_path(&fn_name, SymbolCase::SnakeCase) else {
+        let Some(path) = symbol_to_path(&fn_name, SymbolCase::Snake) else {
             eprintln!(
                 "Skipping template declaration for {fn_name} cause it can't be turned into a path."
             );
@@ -481,12 +406,12 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
             .args
             .iter()
             .filter_map(|garg| {
-                if let Some(ty) = garg.as_type() {
+                if garg.as_type().is_some() {
                     let ts = format!("typename T{t_idx}");
                     t_idx += 1;
                     Some(ts)
                 } else {
-                    let cst = garg.as_const()?;
+                    garg.as_const()?;
 
                     let cs = format!("typename TC{c_idx}, TC{c_idx} C{c_idx}");
                     c_idx += 1;
@@ -496,21 +421,17 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
             .intersperse(",".to_string())
             .collect();
         let template = if garg_body.is_empty() {
-            "".into()
+            String::new()
         } else {
             format!("template<{garg_body}> ")
         };
         // TODO: fully
         let polyfn_sig = tcx.fn_sig(genetric_fn.def_id());
-        let ret = if let Some(ret) = (polyfn_sig.skip_binder()).output().no_bound_vars() {
-            ret
-        } else {
+        let Some(ret) = (polyfn_sig.skip_binder()).output().no_bound_vars() else {
             eprintln!("Skipping template declaration for {fn_name} cause it has a generic return.");
             return None;
         };
-        let inputs = if let Some(ret) = (polyfn_sig.skip_binder()).inputs().no_bound_vars() {
-            ret
-        } else {
+        let Some(inputs) = (polyfn_sig.skip_binder()).inputs().no_bound_vars() else {
             eprintln!("Skipping template declaration for {fn_name} cause it has a generic arg.");
             return None;
         };
@@ -541,12 +462,10 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 eprintln!("Skipping template declaration for {fn_name} cause it has a generic(is_generic) return.");
                 return None;
             }
+        } else if is_zst(ret, tcx) {
+            "void".into()
         } else {
-            if is_zst(ret, tcx) {
-                "void".into()
-            } else {
-                c_type_string(ret, tcx, self, genetric_fn)
-            }
+            c_type_string(ret, tcx, self, genetric_fn)
         };
 
         let decl = format!("{ret} {end}({inputs})");
@@ -582,7 +501,7 @@ fn add_ty<'tcx>(
                 sb.defined_tys.insert(t);
             }
         }
-        TyKind::Array(elem, len) => {
+        TyKind::Array(elem, _) => {
             add_ty(sb, tcx, *elem, instance);
         }
         TyKind::Tuple(elems) => {
@@ -682,6 +601,7 @@ fn add_ty<'tcx>(
                 .expect("Could not compute the layout of a type.");
 
             match &layout.variants {
+                Variants::Empty=>todo!(),
                     Variants::Single { index: _ } => match &layout.fields{
                         FieldsShape::Primitive => panic!("type {name} has primitive layout, but is not primitive."),
                         FieldsShape::Arbitrary{offsets, memory_index:_}=>{
@@ -765,9 +685,10 @@ fn add_ty<'tcx>(
             };
 
             match &layout.variants {
+                Variants::Empty => todo!(),
                 Variants::Single { index: _ } => match &layout.fields {
                     FieldsShape::Primitive if is_zst(t, tcx) => {
-                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -852,7 +773,7 @@ fn add_ty<'tcx>(
                         } else {
                             String::new()
                         };
-                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -923,7 +844,7 @@ fn add_ty<'tcx>(
                         } else {
                             String::new()
                         };
-                        if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
+                        if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
                             let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
                             let namespace: String = beg
                                 .iter()
@@ -1065,20 +986,21 @@ fn add_ty<'tcx>(
                         .iter()
                         .map(|(vs, _)| vs.as_str())
                         .collect::<String>();
-                    varaints
-                        .iter()
-                        .for_each(|(_, (variant_name, variant_def))| {
-                            sb.add_rust_if_missing(variant_def, variant_name)
-                        });
+                    for (_, (variant_name, variant_def)) in &varaints {
+                        sb.add_rust_if_missing(variant_def, variant_name);
+                    }
                     let rust_enum_fields = varaints
                         .iter()
                         .map(|(_, (variant_name, _))| format!("\t{variant_name}:{variant_name},\n"))
                         .collect::<String>();
                     sb.add_rust_if_missing(&format!("#[derive(Clone,Copy)]#[repr(C)]\nunion {name}{{tag:RustTag<{tag_offset},{primitive}>,{rust_enum_fields}}}\n",primitive = primitive_to_rust_type(tag.primitive()),name = name.replace('$',"ds")), &name);
-                    if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
+                    if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
                         let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
-                        let namespace: String =
-                            beg.iter().map(|s| s.as_str()).intersperse("::").collect();
+                        let namespace: String = beg
+                            .iter()
+                            .map(std::string::String::as_str)
+                            .intersperse("::")
+                            .collect();
                         sb.source_file
                             .push(format!("#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace}{{{template_preifx}union {align}{end}{generics}{{\n{varaint_string}\nstruct{{{pad}{tag_type} tag;}} tag;\n}};\n}}\n#define _RUST_TY_DEF_{name} \n#endif\n"));
                     } else {
@@ -1094,16 +1016,17 @@ fn add_ty<'tcx>(
         TyKind::Slice(elem) => {
             let name = mangle(t, tcx);
             sb.source_file.push(format!("#ifndef _RUST_TY_DEF_{name}\nstruct {name} {{}};\n#define _RUST_TY_DEF_{name}\n#endif\n"));
-            add_ty(sb, tcx, *elem, instance)
+            add_ty(sb, tcx, *elem, instance);
         }
         TyKind::Str => {
-            sb.source_file.push(format!("struct ss {{}};\n"));
+            sb.source_file.push("struct ss {};\n");
         }
         _ => todo!("Can't add the relevant typedefs for type {:?}", t.kind()),
     }
     sb.defined_tys.insert(t);
 }
-pub fn create_shim(fn_name: &str) -> String {
+///  Finds the name of a C-to-Rust shim
+pub fn c_shim_name(fn_name: &str) -> String {
     const SHIM_NAME: &str = "c_to_rust_shim";
     if !fn_name.ends_with('E') {
         return format!("{fn_name}{SHIM_NAME}");
@@ -1121,6 +1044,7 @@ pub fn create_shim(fn_name: &str) -> String {
         shim_len = SHIM_NAME.len()
     )
 }
+/// Adds a generic template for a type.
 pub fn add_ty_template<'tcx>(
     sb: &mut CSourceBuilder<'tcx>,
     tcx: TyCtxt<'tcx>,
@@ -1130,59 +1054,59 @@ pub fn add_ty_template<'tcx>(
         return;
     }
 
-    match generic_t.kind() {
-        TyKind::Adt(def, gargs) => {
-            assert!(sb.declared_tys.insert(generic_t));
+    if let TyKind::Adt(def, gargs) = generic_t.kind() {
+        assert!(sb.declared_tys.insert(generic_t));
 
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
-            // Get the mangled path: it is absolute, and not poluted by types being rexported
-            let name = crate::instance_ident(adt_instance, tcx);
-            let ty_type = match def.adt_kind() {
-                rustc_middle::ty::AdtKind::Struct => "struct",
-                rustc_middle::ty::AdtKind::Union => "union",
-                rustc_middle::ty::AdtKind::Enum if def.variants().len() > 0 => "union",
-                rustc_middle::ty::AdtKind::Enum => "struct",
-            };
-            let mut t_idx = 0;
-            let mut c_idx = 0;
-            let garg_body: String = gargs
+        let adt_instance =
+            Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
+                .unwrap()
+                .unwrap();
+        // Get the mangled path: it is absolute, and not poluted by types being rexported
+        let name = crate::instance_ident(adt_instance, tcx);
+        let ty_type = match def.adt_kind() {
+            rustc_middle::ty::AdtKind::Union => "union",
+            rustc_middle::ty::AdtKind::Enum if !def.variants().is_empty() => "union",
+            rustc_middle::ty::AdtKind::Struct  | rustc_middle::ty::AdtKind::Enum => "struct",
+        };
+        let mut t_idx = 0;
+        let mut c_idx = 0;
+        let garg_body: String = gargs
+            .iter()
+            .filter_map(|garg| {
+                if garg.as_type().is_some() {
+                    let ts = format!("typename T{t_idx}");
+                    t_idx += 1;
+                    Some(ts)
+                } else {
+                    garg.as_const()?;
+
+                    let cs = format!("typename TC{c_idx}, TC{c_idx} C{c_idx}");
+                    c_idx += 1;
+                    Some(cs)
+                }
+            })
+            .intersperse(",".to_string())
+            .collect();
+        let template = if garg_body.is_empty() {
+            String::new()
+        } else {
+            format!("template<{garg_body}> ")
+        };
+
+        if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
+            let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
+            let namespace: String = beg
                 .iter()
-                .filter_map(|garg| {
-                    if let Some(ty) = garg.as_type() {
-                        let ts = format!("typename T{t_idx}");
-                        t_idx += 1;
-                        Some(ts)
-                    } else {
-                        let cst = garg.as_const()?;
-
-                        let cs = format!("typename TC{c_idx}, TC{c_idx} C{c_idx}");
-                        c_idx += 1;
-                        Some(cs)
-                    }
-                })
-                .intersperse(",".to_string())
+                .map(std::string::String::as_str)
+                .intersperse("::")
                 .collect();
-            let template = if garg_body.is_empty() {
-                "".into()
-            } else {
-                format!("template<{garg_body}> ")
-            };
-
-            if let Some(path) = symbol_to_path(&name, SymbolCase::PascalCase) {
-                let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
-                let namespace: String = beg.iter().map(|s| s.as_str()).intersperse("::").collect();
-                sb.source_file.push(format!(
-                    "\nnamespace {namespace} {{{template}{ty_type} {end};}}\n"
-                ));
-            } else {
-                sb.source_file
-                    .push(format!("\n{template}{ty_type} {name};\n"));
-            }
+            sb.source_file.push(format!(
+                "\nnamespace {namespace} {{{template}{ty_type} {end};}}\n"
+            ));
+        } else {
+            sb.source_file
+                .push(format!("\n{template}{ty_type} {name};\n"));
         }
-        _ => (),
     }
 }
 /// Calculates the size of a type
@@ -1251,6 +1175,7 @@ fn primitive_to_rust_type(primitive: rustc_target::abi::Primitive) -> &'static s
         Primitive::Pointer(_) => "*const ()",
     }
 }
+/// Makes the first letter of a string uppercase
 fn make_first_letter_uppercase(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -1258,20 +1183,27 @@ fn make_first_letter_uppercase(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
 }
+/// Case required by a symbol
 pub enum SymbolCase {
-    PascalCase,
-    SnakeCase,
-    ScreemingCase,
+    /// `PascalCase`
+    Pascal,
+    /// `snake_case`
+    Snake,
+    /// `SCREAMING_CASE`
+    #[allow(dead_code)]
+    Screeming,
 }
 impl SymbolCase {
+    /// Changes a given string to the selected case
     fn make_case(&self, s: &str) -> String {
         match self {
-            Self::PascalCase => make_first_letter_uppercase(s),
-            Self::SnakeCase => s.to_lowercase(),
-            Self::ScreemingCase => s.to_uppercase(),
+            Self::Pascal => make_first_letter_uppercase(s),
+            Self::Snake => s.to_lowercase(),
+            Self::Screeming => s.to_uppercase(),
         }
     }
 }
+/// Escapes stirngs witch are reserved in C++.
 pub fn escape_forbidden_symbol(symbol: &str) -> String {
     match symbol {
         "float" => "_float".to_string(),
@@ -1286,9 +1218,12 @@ pub fn escape_forbidden_symbol(symbol: &str) -> String {
         _ => symbol.to_string(),
     }
 }
+/// Changes a mangled symbol to a path, if possible.
 pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
     let demangled = format!("{:#}", rustc_demangle::demangle(symbol));
-    if !demangled.contains(['.', '>', '{', '}']) {
+    if demangled.contains(['.', '>', '{', '}']) {
+        None
+    } else {
         let last = demangled.split("::").count() - 1;
         Some(
             demangled
@@ -1296,7 +1231,7 @@ pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
                 .enumerate()
                 .map(|(idx, e)| {
                     let res = if idx == last {
-                        case.make_case(&e.to_string())
+                        case.make_case(e)
                     } else {
                         e.to_string().to_lowercase()
                     };
@@ -1304,10 +1239,9 @@ pub fn symbol_to_path(symbol: &str, case: SymbolCase) -> Option<Vec<String>> {
                 })
                 .collect(),
         )
-    } else {
-        None
     }
 }
+/// Gets the string representing a generic arg.
 pub fn generic_ty_string<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
@@ -1336,7 +1270,7 @@ pub fn generic_ty_string<'tcx>(
                         let tpe = generic_ty_string(*elem, tcx, source_builder, instance);
                         format!("RustSlice<{tpe}>")
                     }
-                    TyKind::Dynamic(_, _, _) => format!("RustDyn"),
+                    TyKind::Dynamic(_, _, _) => "RustDyn".to_string(),
                     _ => format!(
                         "RustFatPtr<{inner}>",
                         inner = generic_ty_string(*inner, tcx, source_builder, instance)
@@ -1357,6 +1291,7 @@ pub fn generic_ty_string<'tcx>(
         }
     }
 }
+/// Geets a string representing the generic args of an adt/fn def
 pub fn generic_string<'tcx>(
     list: &'tcx List<GenericArg<'tcx>>,
     tcx: TyCtxt<'tcx>,
@@ -1387,13 +1322,15 @@ pub fn generic_string<'tcx>(
                     //TyKind::Uint(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_u128().unwrap()).into(),
                     //TyKind::Int(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_i128().unwrap()).into(),
                     _ => {
+                     
                         use std::hash::Hash;
                         use std::hash::Hasher;
+                        #[allow(deprecated)]
                         use std::hash::SipHasher;
-
+                        #[allow(deprecated)]
                         let mut hasher = SipHasher::new_with_keys(0xDEAD_C0FFE, 0xBEEF_BABE);
                         val_tree.hash(&mut hasher);
-                        format!("{:#}", hasher.finish() as u64)
+                        format!("{:#}", { hasher.finish() })
                     }
                 };
                 Some(format!("{c_type}, {val}"))
@@ -1415,37 +1352,32 @@ impl<'tcx> rustc_middle::ty::TypeVisitor<TyCtxt<'tcx>> for TemplateGenerator<'tc
     fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
         use crate::rustc_middle::ty::TypeVisitable;
 
-        match t.kind() {
-            TyKind::Adt(def, gargs) => {
-                self.sb.source_file.push(&format!("// {gargs:?}\n"));
-                let adt_instance = Instance::try_resolve(
-                    self.tcx,
-                    TypingEnv::fully_monomorphized(),
-                    def.did(),
-                    gargs,
-                )
-                .unwrap()
-                .unwrap();
-                let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
-                    self.tcx,
-                    adt_instance.def_id(),
-                );
-                let generic_t = Instance::new(adt_instance.def_id(), poly_gargs)
-                    .ty(self.tcx, TypingEnv::fully_monomorphized());
-                if self.sb.is_ty_declared(generic_t) {
-                    return;
-                }
-                for generic in gargs.as_slice() {
-                    if let Some(ty) = generic.as_type() {
-                        ty.visit_with(self);
-                    }
-                }
-                add_ty_template(self.sb, self.tcx, generic_t);
+        if let TyKind::Adt(def, gargs) = t.kind() {
+            self.sb.source_file.push(format!("// {gargs:?}\n"));
+            let adt_instance =
+                Instance::try_resolve(self.tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
+                    .unwrap()
+                    .unwrap();
+            let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
+                self.tcx,
+                adt_instance.def_id(),
+            );
+            let generic_t = Instance::new(adt_instance.def_id(), poly_gargs)
+                .ty(self.tcx, TypingEnv::fully_monomorphized());
+            if self.sb.is_ty_declared(generic_t) {
+                return;
             }
-            _ => (),
+            for generic in gargs.as_slice() {
+                if let Some(ty) = generic.as_type() {
+                    ty.visit_with(self);
+                }
+            }
+            add_ty_template(self.sb, self.tcx, generic_t);
         }
     }
 }
+/// Checks if a given type is generic or not
+#[allow(clippy::match_same_arms)]
 fn is_generic(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) => is_generic(*inner),
@@ -1453,7 +1385,7 @@ fn is_generic(ty: Ty) -> bool {
         TyKind::Param(_) => true,
         TyKind::Adt(_, generics) => generics
             .iter()
-            .filter_map(|garg| garg.as_type())
+            .filter_map(rustc_middle::ty::GenericArg::as_type)
             .any(|ty| is_generic(ty)),
         TyKind::Slice(inner) => is_generic(*inner),
         TyKind::Int(_)
@@ -1474,11 +1406,11 @@ fn is_generic(ty: Ty) -> bool {
         | TyKind::Coroutine(_, generics)
         | TyKind::CoroutineWitness(_, generics) => generics
             .iter()
-            .filter_map(|garg| garg.as_type())
+            .filter_map(rustc_middle::ty::GenericArg::as_type)
             .any(|ty| is_generic(ty)),
         TyKind::FnDef(_, generics) => generics
             .iter()
-            .filter_map(|garg| garg.as_type())
+            .filter_map(rustc_middle::ty::GenericArg::as_type)
             .any(|ty| is_generic(ty)),
         TyKind::Alias(_, _) => true,
         TyKind::FnPtr(binder, _) => {
@@ -1489,18 +1421,21 @@ fn is_generic(ty: Ty) -> bool {
             }
         }
         TyKind::Error(_) => true,
-        //_=>todo!("Can't determine if {ty:?} is generic")
+        TyKind::UnsafeBinder(_)  => todo!("Can't determine if UnsafeBinder is generic"),
+        // _ => todo!("Can't determine if {ty:?} is generic"),
     }
 }
+/// DEBUG: displays the kind of a type.
+#[allow(dead_code)]
 fn display_ty_kind(ty: Ty) {
     eprintln!(
         "{}",
         match ty.kind() {
-            TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) => "RawPtr",
-            TyKind::Tuple(elements) => "Tuple",
+            TyKind::RawPtr(_, _) | TyKind::Ref(_, _, _) => "RawPtr",
+            TyKind::Tuple(_) => "Tuple",
             TyKind::Param(_) => "Param",
-            TyKind::Adt(_, generics) => "Adt",
-            TyKind::Slice(inner) => "Slice",
+            TyKind::Adt(_, _) => "Adt",
+            TyKind::Slice(_) => "Slice",
             TyKind::Int(_)
             | TyKind::Uint(_)
             | TyKind::Float(_)
@@ -1510,28 +1445,30 @@ fn display_ty_kind(ty: Ty) {
             | TyKind::Str => "primitive",
             TyKind::Placeholder(_) => "Placeholder",
             TyKind::Infer(_) => "Infer",
-            TyKind::Array(elem, length) => "Array",
+            TyKind::Array(_, _) => "Array",
             TyKind::Foreign(_) => "Foreign",
             TyKind::Pat(_, _) | TyKind::Bound(_, _) => "Bound",
             TyKind::Dynamic(_, _, _) => "Dynamic",
-            TyKind::Closure(_, generics)
-            | TyKind::CoroutineClosure(_, generics)
-            | TyKind::Coroutine(_, generics)
-            | TyKind::CoroutineWitness(_, generics) => "Closure",
-            TyKind::FnDef(_, generics) => "FnDef",
+            TyKind::Closure(_, _)
+            | TyKind::CoroutineClosure(_, _)
+            | TyKind::Coroutine(_, _)
+            | TyKind::CoroutineWitness(_, _) => "Closure",
+            TyKind::FnDef(_, _) => "FnDef",
             TyKind::Alias(_, _) => "Alias",
             TyKind::FnPtr(_, _) => "FnPtr",
             TyKind::Error(_) => "Error",
+            TyKind::UnsafeBinder(_) => "UnsafeBinder",
             //_=>todo!("Can't determine if {ty:?} is generic")
         }
     );
 }
+/// Changes the parameter index into a short type name
 fn paramidx_to_name(param: ParamTy, gargs: &List<GenericArg>) -> String {
     let mut c_idx = 0;
     let mut t_idx = 0;
     for (curr_idx, garg) in gargs.iter().enumerate() {
-        if let Some(_) = garg.as_type() {
-            if curr_idx as u32 == param.index {
+        if garg.as_type().is_some() {
+            if std::convert::TryInto::<u32>::try_into(curr_idx).unwrap() == param.index {
                 return format!("T{t_idx}");
             }
             t_idx += 1;
@@ -1539,7 +1476,7 @@ fn paramidx_to_name(param: ParamTy, gargs: &List<GenericArg>) -> String {
             let Some(_) = garg.as_const() else {
                 continue;
             };
-            if curr_idx as u32 == param.index {
+            if std::convert::TryInto::<u32>::try_into(curr_idx).unwrap() == param.index {
                 return format!("TC{c_idx}");
             }
             c_idx += 1;
@@ -1548,6 +1485,7 @@ fn paramidx_to_name(param: ParamTy, gargs: &List<GenericArg>) -> String {
     panic!()
 }
 /// Checks if the function contains a specific combo of of types / generics that make creating a template for it impossible/nearly impossible.
+#[allow(clippy::match_same_arms)]
 fn unsuported_garg_in_sig<'tcx>(instance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     // TODO: this just checks if it is *possible* for one of gargs to cause an issue, but this may be too conservative.
     // TODO: make this recursive.

@@ -10,5 +10,5 @@ fn main() {
             dirs.push(path.file_stem().unwrap().to_str().unwrap().to_string());
         }
     }
-    panic!("dirs:{dirs:?}")
+    //panic!("dirs:{dirs:?}")
 }

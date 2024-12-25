@@ -1,22 +1,12 @@
 use crate::monomorphize;
 use crate::souce_builder::{self, CSourceBuilder};
-use rustc_middle::mir::mono::MonoItemData;
-use rustc_middle::ty::FloatTy;
 use rustc_middle::ty::Instance;
-use rustc_middle::ty::IntTy;
 use rustc_middle::ty::PseudoCanonicalInput;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::TyKind;
 use rustc_middle::ty::TypingEnv;
-use rustc_middle::ty::UintTy;
 
-use rustc_target::abi::call::ArgAttribute;
-use rustc_target::abi::Reg;
-use rustc_target::abi::RegKind;
-use rustc_target::abi::Size;
-use rustc_target::abi::Variants;
-use rustc_target::callconv::CastTarget;
 use rustc_target::callconv::PassMode;
 
 use rustc_hir::Mutability;
@@ -38,7 +28,7 @@ pub fn rust_shim<'tcx>(
         .expect("Could not compute fn abi");
     let args = crate::function::arg_names(instance, tcx, abi.args.len());
     let shim_ret: String = rust_type_string(abi.ret.layout.ty, tcx, souce_builder, instance, false);
-    let mut shim_args: String = (&abi.args)
+    let shim_args: String = (&abi.args)
         .into_iter()
         .zip(args.iter())
         .filter_map(|(arg, name)| {
@@ -62,7 +52,7 @@ pub fn rust_shim<'tcx>(
     souce_builder.add_rust(&format!(
         "extern \"Rust\"{{#[link_name = \"{original_name}\"]pub fn {escaped_real_name}({shim_args})->{shim_ret};}}\n",
     ));
-    let mut real_args: String = (&abi.args)
+    let real_args: String = (&abi.args)
         .into_iter()
         .zip(args.iter())
         .map(|(arg, name)| {
@@ -89,7 +79,7 @@ pub fn rust_shim<'tcx>(
                 _ => format!("{name}.into()"),
             }
         })
-        .intersperse((&",").to_string())
+        .intersperse((",").to_string())
         .collect();
     let translator_body = format!("unsafe{{{escaped_real_name}({translated_args}).into()}}");
 
@@ -141,7 +131,7 @@ pub fn rust_type_string<'tcx>(
                             "*const [u8]".into()
                         }
                     }
-                    _ => format!("RustFatPtr",),
+                    _ => "RustFatPtr".to_string(),
                 }
             } else if souce_builder::is_zst(*inner, tcx) {
                 format!("*{mutability} ()")
@@ -171,9 +161,10 @@ pub fn rust_type_string<'tcx>(
         TyKind::Tuple(elements) => {
             if elements.is_empty() {
                 "()".into()
-            } else if c_safe {
-                format!("{}", crate::function::mangle(ty, tcx))
             } else {
+                crate::function::mangle(ty, tcx).to_string()
+            }
+            /*} else {
                 format!(
                     "({})",
                     elements
@@ -182,7 +173,7 @@ pub fn rust_type_string<'tcx>(
                         .intersperse(",".to_string())
                         .collect::<String>()
                 )
-            }
+            } */
         }
         TyKind::Slice(_) => "RawSlice".into(),
         TyKind::Array(elem, length) => format!(

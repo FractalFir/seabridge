@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 [workspace]
-members = ["codegen"]
+members = ["codegen", "packer"]
