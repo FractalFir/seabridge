@@ -11,14 +11,13 @@ use rustc_middle::ty::TyKind;
 use rustc_middle::ty::TypingEnv;
 use rustc_middle::ty::UintTy;
 
-use rustc_target::abi::call::ArgAttribute;
-
-use rustc_target::callconv::PassMode;
+use rustc_target::callconv::{ArgAttribute, PassMode};
 
 use rustc_hir::Mutability;
 
 use rustc_span::def_id::DefId;
 
+use crate::instance_try_resolve;
 use crate::monomorphize;
 use crate::souce_builder::is_zst;
 use crate::souce_builder::CSourceBuilder;
@@ -227,14 +226,8 @@ pub fn c_type_string<'tcx>(
                 match inner.kind() {
                     TyKind::Adt(def, gargs) => {
                         if !source_builder.is_ty_defined(*inner) {
-                            let adt_instance = Instance::try_resolve(
-                                tcx,
-                                TypingEnv::fully_monomorphized(),
-                                def.did(),
-                                gargs,
-                            )
-                            .unwrap()
-                            .unwrap();
+                            let adt_instance = instance_try_resolve(def.did(), tcx, gargs);
+
                             let poly_gargs =
                                 List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
                                     tcx,
@@ -341,10 +334,7 @@ pub fn c_type_string<'tcx>(
         TyKind::Adt(def, gargs) => adt_ident(tcx, gargs, def.did(), source_builder, instance),
         TyKind::FnPtr(_, _) => "RustFn*".into(),
         TyKind::Closure(did, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(*did, tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             format!("struct {}", crate::instance_ident(adt_instance, tcx))
         }
@@ -388,9 +378,7 @@ fn adt_ident<'tcx>(
     source_builder: &mut CSourceBuilder<'tcx>,
     finstance: Instance<'tcx>,
 ) -> String {
-    let adt_instance = Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def, gargs)
-        .unwrap()
-        .unwrap();
+    let adt_instance = instance_try_resolve(def, tcx, gargs);
     // Get the mangled path: it is absolute, and not poluted by types being rexported
     let ident = crate::instance_ident(adt_instance, tcx);
     let generic_string =
@@ -453,10 +441,7 @@ pub fn mangle<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> String {
             format!("d{:x}", s.finish())
         }
         TyKind::Adt(def, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(def.did(), tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             format!(
                 "a{}",
@@ -495,10 +480,7 @@ pub fn mangle<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> String {
             )
         }
         TyKind::Closure(did, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(*did, tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             crate::instance_ident(adt_instance, tcx).to_string()
         }

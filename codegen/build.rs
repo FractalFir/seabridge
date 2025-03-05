@@ -39,14 +39,19 @@ fn test_from_path(path: &Path) -> String {
     };
     // Check if this file is an executable or library
     let test_body = if file_content.contains("fn main()") {
-        format!("let executable = crate::test::utilis::compile_file(std::path::Path::new({path:?}), false, IS_RELEASE); crate::test::utilis::run_test(&executable);")
+        format!("let _lock = super::COMPILE_LOCK.lock().unwrap(); \nlet executable = crate::test::utilis::compile_file(std::path::Path::new({path:?}), false, IS_RELEASE); crate::test::utilis::run_test(&executable);")
     } else {
         format!(
             "crate::test::utilis::compile_file(std::path::Path::new({path:?}), true, IS_RELEASE);"
         )
     };
     // Check if test contains a `main` function, and onlt run it if so.
-    format!("mod {test_name}{{ mod debug{{\n  #[cfg(test)]\n  const IS_RELEASE:bool = false;\n  #[test]\n  fn {stable}(){{{test_body}}}}}\n mod release{{\n  #[cfg(test)]\n  const IS_RELEASE:bool = true;\n  #[test]\n  fn {stable}(){{{test_body}}}}}}}\n")
+    format!("mod {test_name}{{
+ #[cfg(test)]
+    static COMPILE_LOCK:std::sync::Mutex<()> = std::sync::Mutex::new(());
+mod debug{{\n
+#[cfg(test)]\n  const IS_RELEASE:bool = false;\n 
+#[test]\n  fn {stable}(){{{test_body}}}}}\n mod release{{\n  #[cfg(test)]\n  const IS_RELEASE:bool = true;\n  #[test]\n  fn {stable}(){{{test_body}}}}}}}\n")
 }
 fn main() {
     // Tell Cargo that if the given file changes, to rerun this build script.

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::instance_try_resolve;
 use crate::rust::rust_type_string;
 use crate::rustc_middle::ty::TypeVisitableExt;
 use rustc_middle::ty::AdtKind;
@@ -16,8 +17,8 @@ use rustc_middle::ty::TyKind;
 use rustc_middle::ty::TypingEnv;
 use rustc_middle::ty::UintTy;
 
-use rustc_target::abi::FieldsShape;
-use rustc_target::abi::Variants;
+use rustc_abi::FieldsShape;
+use rustc_abi::Variants;
 
 use rustc_abi::Size;
 
@@ -98,7 +99,7 @@ impl<'tcx> CSourceBuilder<'tcx> {
     pub fn set_declared(&mut self, instance: Instance<'tcx>) {
         self.decalred.insert(instance);
     }
- 
+
     /// Checks if this instance is `defined`
     pub fn is_defined(&self, instance: Instance<'tcx>) -> bool {
         self.defined.contains(&instance)
@@ -269,14 +270,7 @@ struct RustTag<const TAG_OFFSET:usize,Tag>{
                 eprintln!("WARNING:{finstance:?} contains gargs which are not representable in C++. Skipping.");
                 return;
             }
-            let generic_instance = Instance::try_resolve(
-                tcx,
-                TypingEnv::fully_monomorphized(),
-                finstance.def_id(),
-                finstance.args,
-            )
-            .unwrap()
-            .unwrap();
+            let generic_instance = instance_try_resolve(finstance.def_id(), tcx, finstance.args);
             let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
                 tcx,
                 generic_instance.def_id(),
@@ -587,10 +581,7 @@ fn add_ty<'tcx>(
             sb.delay_typedef(fn_ptr.output());
         }
         TyKind::Closure(did, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(*did, tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             let name = crate::instance_ident(adt_instance, tcx).replace('.', "_");
             let layout = tcx
@@ -654,10 +645,7 @@ fn add_ty<'tcx>(
             sb.source_file.push(format!("struct {name}{{}};\n"));
         }
         TyKind::Adt(def, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(def.did(), tcx, gargs);
             let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
                 tcx,
                 adt_instance.def_id(),
@@ -685,7 +673,25 @@ fn add_ty<'tcx>(
             };
 
             match &layout.variants {
-                Variants::Empty => todo!(),
+                Variants::Empty => {
+                    if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
+                        let (beg, end) = (&path[..(path.len() - 1)], &path[path.len() - 1]);
+                        let namespace: String = beg
+                            .iter()
+                            .map(std::string::String::as_str)
+                            .intersperse("::")
+                            .collect();
+
+                        sb.source_file.push(format!(
+                            "\n#ifndef _RUST_TY_DEF_{name}\nnamespace {namespace} {{{template_preifx}struct {end}{generics}{{}};}}\n#define _RUST_TY_DEF_{name} 1\n#endif\n"
+                        ));
+                    } else {
+                        sb.source_file
+                            .push(format!("\n#ifndef _RUST_TY_DEF_{name} struct {name}{{}};#define _RUST_TY_DEF_{name} 1\n#endif\n"));
+                        sb.assert_sizeof(&format!("struct {name}"), layout.size.bytes());
+                        sb.assert_alignof(&format!("struct {name}"), layout.align.abi.bytes());
+                    }
+                },
                 Variants::Single { index: _ } => match &layout.fields {
                     FieldsShape::Primitive if is_zst(t, tcx) => {
                         if let Some(path) = symbol_to_path(&name, SymbolCase::Pascal) {
@@ -1057,16 +1063,13 @@ pub fn add_ty_template<'tcx>(
     if let TyKind::Adt(def, gargs) = generic_t.kind() {
         assert!(sb.declared_tys.insert(generic_t));
 
-        let adt_instance =
-            Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                .unwrap()
-                .unwrap();
+        let adt_instance = instance_try_resolve(def.did(), tcx, gargs);
         // Get the mangled path: it is absolute, and not poluted by types being rexported
         let name = crate::instance_ident(adt_instance, tcx);
         let ty_type = match def.adt_kind() {
             rustc_middle::ty::AdtKind::Union => "union",
             rustc_middle::ty::AdtKind::Enum if !def.variants().is_empty() => "union",
-            rustc_middle::ty::AdtKind::Struct  | rustc_middle::ty::AdtKind::Enum => "struct",
+            rustc_middle::ty::AdtKind::Struct | rustc_middle::ty::AdtKind::Enum => "struct",
         };
         let mut t_idx = 0;
         let mut c_idx = 0;
@@ -1128,9 +1131,9 @@ pub fn is_zst<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     .is_zst()
 }
 /// Converts a Primtive to a C type string.
-fn primitive_to_type(primitive: rustc_target::abi::Primitive) -> &'static str {
-    use rustc_target::abi::Integer;
-    use rustc_target::abi::Primitive;
+fn primitive_to_type(primitive: rustc_abi::Primitive) -> &'static str {
+    use rustc_abi::Integer;
+    use rustc_abi::Primitive;
     match primitive {
         Primitive::Int(int, sign) => match (int, sign) {
             (Integer::I8, true) => "int8_t",
@@ -1152,9 +1155,9 @@ fn primitive_to_type(primitive: rustc_target::abi::Primitive) -> &'static str {
     }
 }
 /// Converts a Primtive to a Rust type string.
-fn primitive_to_rust_type(primitive: rustc_target::abi::Primitive) -> &'static str {
-    use rustc_target::abi::Integer;
-    use rustc_target::abi::Primitive;
+fn primitive_to_rust_type(primitive: rustc_abi::Primitive) -> &'static str {
+    use rustc_abi::Integer;
+    use rustc_abi::Primitive;
     match primitive {
         Primitive::Int(int, sign) => match (int, sign) {
             (Integer::I8, true) => "i8",
@@ -1305,7 +1308,9 @@ pub fn generic_string<'tcx>(
                 Some(generic_ty_string(ty, tcx, source_builder, finstance))
             } else {
                 let cst = garg.as_const()?;
-                let (val_tree, ty) = cst.to_valtree();
+                let cst = cst.to_value();
+                let ty = cst.ty;
+                let val_tree = cst.valtree;
                 let c_type = generic_ty_string(ty, tcx, source_builder, finstance);
                 let val = match ty.kind() {
                     TyKind::Bool => {
@@ -1322,7 +1327,6 @@ pub fn generic_string<'tcx>(
                     //TyKind::Uint(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_u128().unwrap()).into(),
                     //TyKind::Int(_)=>format!("{:x}",val_tree.try_to_scalar().unwrap().to_i128().unwrap()).into(),
                     _ => {
-                     
                         use std::hash::Hash;
                         use std::hash::Hasher;
                         #[allow(deprecated)]
@@ -1354,10 +1358,7 @@ impl<'tcx> rustc_middle::ty::TypeVisitor<TyCtxt<'tcx>> for TemplateGenerator<'tc
 
         if let TyKind::Adt(def, gargs) = t.kind() {
             self.sb.source_file.push(format!("// {gargs:?}\n"));
-            let adt_instance =
-                Instance::try_resolve(self.tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(def.did(), self.tcx, gargs);
             let poly_gargs = List::<rustc_middle::ty::GenericArg<'_>>::identity_for_item(
                 self.tcx,
                 adt_instance.def_id(),
@@ -1397,7 +1398,7 @@ fn is_generic(ty: Ty) -> bool {
         | TyKind::Str => false,
         TyKind::Placeholder(_) => true,
         TyKind::Infer(_) => true,
-        TyKind::Array(elem, length) => is_generic(*elem) | length.try_to_valtree().is_none(),
+        TyKind::Array(elem, length) => is_generic(*elem) | length.try_to_value().is_none(),
         TyKind::Foreign(_) => false,
         TyKind::Pat(_, _) | TyKind::Bound(_, _) => true,
         TyKind::Dynamic(_, _, _) => false,
@@ -1421,7 +1422,7 @@ fn is_generic(ty: Ty) -> bool {
             }
         }
         TyKind::Error(_) => true,
-        TyKind::UnsafeBinder(_)  => todo!("Can't determine if UnsafeBinder is generic"),
+        TyKind::UnsafeBinder(_) => todo!("Can't determine if UnsafeBinder is generic"),
         // _ => todo!("Can't determine if {ty:?} is generic"),
     }
 }

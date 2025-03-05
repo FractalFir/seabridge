@@ -1,7 +1,6 @@
 #![cfg(test)]
 use std::{
-    path::{Path, PathBuf},
-    sync::LazyLock,
+    collections::HashMap, hash::{BuildHasherDefault, DefaultHasher, Hash}, path::{Path, PathBuf}, sync::LazyLock
 };
 /// Builds the codegen backend, returning a relative path to it. May only be called directly from the test harness.
 fn build_backend() -> &'static Path {

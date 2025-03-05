@@ -87,6 +87,12 @@ use souce_builder::StringBuilder;
 
 use std::path::Path;
 
+use rustc_middle::ty::List;
+
+use rustc_middle::ty::GenericArg;
+
+use rustc_middle::ty::PseudoCanonicalInput;
+
 use std::any::Any;
 /// Retrives the name of a static.
 fn static_ident(stotic: DefId, tcx: TyCtxt<'_>) -> String {
@@ -137,7 +143,7 @@ impl CodegenBackend for CBackend {
         _need_metadata_module: bool,
     ) -> Box<dyn Any> {
         // What is this `defid_set`? The doc's don't seem to explain it too well...
-        let (_defid_set, cgus) = tcx.collect_and_partition_mono_items(());
+        let monos = tcx.collect_and_partition_mono_items(());
         let crate_info = CrateInfo::new(tcx, "??".to_string());
         // Generate a separate source file for each cgu.
         let source_files = {
@@ -149,7 +155,8 @@ impl CodegenBackend for CBackend {
                     .expect("Targets with pointer size bigger than 256 not supported!"),
             );
             let name = crate_info.local_crate_name.to_string();
-            for (item, data) in cgus
+            for (item, data) in monos
+                .codegen_units
                 .iter()
                 .flat_map(rustc_middle::mir::mono::CodegenUnit::items)
             {
@@ -226,7 +233,7 @@ impl CodegenBackend for CBackend {
                 eprintln!(
                     "rust_bridge_source:{rust_bridge_source:?} rust_bridge_lib:{rust_bridge_lib:?}"
                 );
-                assert!(out.status.success(), "{out:?}");
+                assert!(out.status.success(), "stdout:{} stderr:{}",String::from_utf8(out.stdout).unwrap(),String::from_utf8(out.stderr).unwrap());
                 CompiledModule {
                     name,
                     kind: ModuleKind::Regular,
@@ -286,7 +293,7 @@ pub fn is_fat_ptr<'tcx>(
     tcx: TyCtxt<'tcx>,
     method: rustc_middle::ty::Instance<'tcx>,
 ) -> bool {
-    use rustc_target::abi::BackendRepr;
+    use rustc_abi::BackendRepr;
     let ptr_type = monomorphize(method, ptr_type, tcx);
     let layout = tcx
         .layout_of(rustc_middle::ty::PseudoCanonicalInput {
@@ -301,4 +308,16 @@ pub fn is_fat_ptr<'tcx>(
         BackendRepr::ScalarPair(_, _) => true,
         _ => panic!("Unexpected abi of pointer to {ptr_type:?}. The ABI was:{abi:?}"),
     }
+}
+pub fn instance_try_resolve<'tcx>(
+    adt: DefId,
+    tcx: TyCtxt<'tcx>,
+    gargs: &'tcx List<GenericArg<'tcx>>,
+) -> Instance<'tcx> {
+    tcx.resolve_instance_raw(PseudoCanonicalInput {
+        typing_env: rustc_middle::ty::TypingEnv::fully_monomorphized(),
+        value: (adt, gargs),
+    })
+    .unwrap()
+    .unwrap()
 }

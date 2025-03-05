@@ -1,5 +1,5 @@
 #![feature(allocator_api)]
-#![allow(dead_code,non_camel_case_types)]
+#![allow(dead_code, non_camel_case_types)]
 use std::ptr::NonNull;
 #[repr(C)]
 pub struct aiocb {

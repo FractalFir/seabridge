@@ -1,5 +1,5 @@
-use crate::monomorphize;
 use crate::souce_builder::{self, CSourceBuilder};
+use crate::{instance_try_resolve, monomorphize};
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::PseudoCanonicalInput;
 use rustc_middle::ty::Ty;
@@ -143,18 +143,12 @@ pub fn rust_type_string<'tcx>(
             }
         }
         TyKind::Adt(def, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), def.did(), gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(def.did(), tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             crate::instance_ident(adt_instance, tcx).replace('$', "ds")
         }
         TyKind::Closure(did, gargs) => {
-            let adt_instance =
-                Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), *did, gargs)
-                    .unwrap()
-                    .unwrap();
+            let adt_instance = instance_try_resolve(*did, tcx, gargs);
             // Get the mangled path: it is absolute, and not poluted by types being rexported
             crate::instance_ident(adt_instance, tcx).replace('$', "ds")
         }

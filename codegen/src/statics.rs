@@ -19,7 +19,7 @@ pub(crate) fn static_decl<'tcx>(
     // This is done first, because in header mode, we don't want to export types used by a private sumbol, which will not be included anyway.
     let attrs = tcx.codegen_fn_attrs(static_def);
     let linkage = match attrs.linkage {
-        Some(Linkage::Private | Linkage::Internal) => {
+        Some(Linkage::Internal) => {
             return None;
         }
         Some(Linkage::Common | Linkage::External | Linkage::AvailableExternally) | None => "extern",
@@ -27,7 +27,6 @@ pub(crate) fn static_decl<'tcx>(
             Linkage::LinkOnceAny
             | Linkage::LinkOnceODR
             | Linkage::WeakAny
-            | Linkage::Appending
             | Linkage::ExternalWeak
             | Linkage::WeakODR,
         ) => panic!("{:?} unsuported", data.linkage),

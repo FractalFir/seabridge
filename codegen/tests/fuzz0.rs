@@ -14,7 +14,7 @@
     clippy::type_complexity,
     clippy::just_underscores_and_digits,
     clippy::large_enum_variant,
-    clippy::nonminimal_bool,
+    clippy::nonminimal_bool
 )]
 extern crate core;
 use core::intrinsics::mir::*;
